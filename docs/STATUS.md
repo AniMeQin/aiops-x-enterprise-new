@@ -34,10 +34,14 @@ Phase 0 — Emergency Fix 正在进行，尚未完成：
 
 Phase 0 仍有以下阻断项：
 
-- Git 仓库的敏感信息/大文件/生成物清查已通过；由于外部卷不支持 Git index 的原子
-  rename，受控初始提交正在本机无元数据快照生成，尚未回写并复验 HEAD。
+- Git 仓库的敏感信息/大文件/生成物清查已通过；已从同一内容的本机无元数据快照建立
+  受控初始提交 `bec5a9617f4cadb4d6f17eb06b4dba91367e42c8`，回写后 HEAD 可解析、
+  378 个文件受跟踪、worktree clean、`git fsck --full` 无损坏。历史测试环境旧 release
+  早于该提交，仍无法映射为此 commit。
 - 测试环境 Edge Agent Prometheus target 的 `connection refused` 尚未整改和现场验证。
-- `0015` 尚未在真实 PostgreSQL 克隆上执行升级/回退/模型差异检查。
+- `0015` 已在一次性 PostgreSQL 15 的最小 0014 父表基线上完成 upgrade → downgrade →
+  re-upgrade；两个表、3 个唯一约束、版本号和回退删除均符合预期。完整旧库克隆升级和
+  `alembic check` 仍属于正式数据库门禁，尚未执行。
 - 本轮尚未执行完整仓库质量门禁、Compose/Promtool、正式 E2E 或任何部署。
 
 ## 本轮已执行的开发级自检
@@ -50,6 +54,7 @@ Phase 0 仍有以下阻断项：
 - Go：gofmt、go vet、race test 和 Edge Agent build 通过。
 - Compose：使用 `.env.example` 的静态 `config --quiet` 通过；本机 Docker daemon 未运行，
   未执行容器构建或运行态测试。
+- PostgreSQL 15 最小 `0014→0015→0014→0015`：通过，服务日志无 ERROR/FATAL/PANIC。
 - Python `py_compile`：First E2E、monitoring、operations 与 `0015` 迁移通过。
 - npm 隔离安装审计：0 vulnerabilities；Vite 仍提示已有大 chunk 警告，留待前端专项整改。
 
@@ -66,6 +71,7 @@ Phase 0 仍有以下阻断项：
 
 ## 下一步
 
-1. 完成 P0 仓库敏感信息/大文件/生成物清查，建立可审计 Git 初始基线。
-2. 修复 Edge Agent 的实际 Prometheus scrape 链，并补充真实 PostgreSQL `0014→0015` 验证。
-3. 完成 Phase 0 复评分；若仍未达到总分和各强制维度门槛，继续 Phase 1，不进入正式测试或部署。
+1. 完成 Phase 0 复评分；若仍未达到总分和各强制维度门槛，继续 Phase 1，不进入正式测试或部署。
+2. 只有未来准入允许部署后，才在测试环境复验 Edge Agent Prometheus target、真实规则触发
+   与恢复；文件修复不等于运行态生效。
+3. 正式数据库阶段补做完整旧库克隆升级、`alembic check`、备份恢复和回退兼容性验证。
