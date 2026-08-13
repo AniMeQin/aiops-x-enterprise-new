@@ -1,0 +1,11 @@
+{{- if .Values.productionEnforced -}}
+{{- if and .Values.networkPolicy.enabled (not .Values.networkPolicy.dependencyCidrs) -}}
+{{- fail "productionEnforced requires networkPolicy.dependencyCidrs for PostgreSQL, Redis, NATS, MinIO, Vault, telemetry and approved AI/provider egress" -}}
+{{- end -}}
+{{- if not .Values.ingress.enabled -}}
+{{- fail "productionEnforced requires the authenticated Web TLS ingress" -}}
+{{- end -}}
+{{- if not .Values.agentGateway.enabled -}}
+{{- fail "productionEnforced requires the independent mTLS Agent gateway" -}}
+{{- end -}}
+{{- end -}}

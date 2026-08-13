@@ -1,0 +1,5 @@
+# Default deployments must not emit business alerts for fabricated project or
+# asset scopes. Administrators publish environment-specific rules only after
+# the referenced CMDB scope exists. The live acceptance flow injects a scoped
+# alert for the real M1 project and asset.
+groups: []

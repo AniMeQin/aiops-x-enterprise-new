@@ -1,0 +1,1 @@
+"""CMDB persistence adapters."""

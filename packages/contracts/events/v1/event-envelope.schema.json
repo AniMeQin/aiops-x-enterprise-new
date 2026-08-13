@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aiops-x.example/contracts/events/v1/event-envelope.schema.json",
+  "title": "AIOps-X Event Envelope v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "event_id",
+    "event_type",
+    "event_version",
+    "occurred_at",
+    "tenant_id",
+    "producer",
+    "trace_id",
+    "data"
+  ],
+  "properties": {
+    "event_id": { "type": "string", "format": "uuid" },
+    "event_type": { "type": "string", "minLength": 3, "maxLength": 160 },
+    "event_version": { "const": 1 },
+    "occurred_at": { "type": "string", "format": "date-time" },
+    "tenant_id": { "type": "string", "format": "uuid" },
+    "project_id": { "type": ["string", "null"], "format": "uuid" },
+    "producer": { "type": "string", "minLength": 1, "maxLength": 120 },
+    "trace_id": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "correlation_id": { "type": ["string", "null"], "maxLength": 120 },
+    "data": { "type": "object" }
+  }
+}

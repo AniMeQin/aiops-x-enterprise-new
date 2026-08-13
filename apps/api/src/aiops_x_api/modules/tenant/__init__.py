@@ -1,0 +1,1 @@
+"""Tenant and project domain."""

@@ -1,0 +1,39 @@
+{{- if .Values.podDisruptionBudget.enabled }}
+{{- range $component := list "api" "worker" "ai-engine" "web" }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: {name: {{ include "aiops-x.fullname" $ }}-{{ $component }}}
+spec:
+  minAvailable: {{ $.Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels: {app.kubernetes.io/instance: {{ $.Release.Name }}, app.kubernetes.io/component: {{ $component }}}
+---
+{{- end }}
+{{- if .Values.agentGateway.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: {name: {{ include "aiops-x.fullname" . }}-agent-gateway}
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels: {app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: agent-gateway}
+---
+{{- end }}
+{{- end }}
+{{- if .Values.autoscaling.enabled }}
+{{- range $name, $component := dict "api" "api" "worker" "worker" }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata: {name: {{ include "aiops-x.fullname" $ }}-{{ $name }}}
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: {{ include "aiops-x.fullname" $ }}-{{ $name }}}
+  minReplicas: {{ (index $.Values.autoscaling $component).minReplicas }}
+  maxReplicas: {{ (index $.Values.autoscaling $component).maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: {type: Utilization, averageUtilization: {{ (index $.Values.autoscaling $component).targetCPUUtilizationPercentage }}}
+---
+{{- end }}
+{{- end }}

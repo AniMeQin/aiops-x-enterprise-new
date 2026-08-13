@@ -1,0 +1,20 @@
+global:
+  resolve_timeout: 1m
+
+route:
+  receiver: aiops-x-control-plane
+  group_by: [alertname, aiops_tenant_slug, aiops_project_slug, aiops_asset_id]
+  group_wait: 2s
+  group_interval: 10s
+  repeat_interval: 1m
+
+receivers:
+  - name: aiops-x-control-plane
+    webhook_configs:
+      - url: http://api:8000/api/v1/webhooks/alertmanager
+        send_resolved: true
+        max_alerts: 100
+        http_config:
+          authorization:
+            type: Bearer
+            credentials_file: /run/secrets/alertmanager-webhook-token

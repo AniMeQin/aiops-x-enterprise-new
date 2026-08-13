@@ -1,0 +1,1 @@
+"""Immutable generated report domain."""

@@ -1,0 +1,139 @@
+productionEnforced: true
+replicaCount:
+  api: 2
+  worker: 2
+  aiEngine: 2
+  web: 2
+  agentGateway: 2
+
+images:
+  python:
+    repository: registry.example.com/aiops-x/python
+    tag: 0.1.0
+    digest: ""
+    pullPolicy: IfNotPresent
+  web:
+    repository: registry.example.com/aiops-x/web
+    tag: 0.1.0
+    digest: ""
+    pullPolicy: IfNotPresent
+  gateway:
+    repository: nginx
+    tag: 1.27.0-alpine
+    digest: ""
+    pullPolicy: IfNotPresent
+  backup:
+    repository: registry.example.com/aiops-x/backup
+    tag: 0.1.0
+    digest: ""
+    pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+existingSecrets:
+  api: aiops-x-api-runtime
+  worker: aiops-x-worker-runtime
+  aiEngine: aiops-x-ai-engine-runtime
+  vault: aiops-x-vault-identity
+  agentPki: aiops-x-agent-pki
+  backup: aiops-x-backup-runtime
+
+config:
+  environment: production
+  logLevel: INFO
+  corsOrigins: '["https://aiops.example.com"]'
+  natsUrl: nats://nats.messaging.svc:4222
+  minioEndpoint: minio.storage.svc:9000
+  minioSecure: true
+  prometheusUrl: http://prometheus.monitoring.svc:9090
+  lokiUrl: http://loki.monitoring.svc:3100
+  tempoUrl: http://tempo.monitoring.svc:3200
+  vaultAddr: https://vault.security.svc:8200
+  vaultKvMount: kv
+  oidcEnabled: true
+  oidcIssuerUrl: https://id.example.com/realms/aiops
+  oidcClientId: aiops-x
+  oidcRedirectUri: https://aiops.example.com/api/v1/auth/oidc/callback
+  otlpEndpoint: http://otel-collector.monitoring.svc:4317
+  outboundAllowedHosts: ["*.example.com"]
+
+externalSecrets:
+  enabled: false
+  secretStoreRef: vault-cluster
+  remoteKeys:
+    api: aiops-x/production/api
+    worker: aiops-x/production/worker
+    aiEngine: aiops-x/production/ai-engine
+    vault: aiops-x/production/vault-identity
+    agentPki: aiops-x/production/agent-pki
+    backup: aiops-x/production/backup
+
+service:
+  webPort: 8080
+  apiPort: 8000
+  aiEnginePort: 8001
+
+ingress:
+  enabled: true
+  className: nginx
+  host: aiops.example.com
+  tlsSecretName: aiops-x-tls
+  annotations: {}
+
+agentGateway:
+  enabled: true
+  host: agents.aiops.example.com
+  tlsSecretName: aiops-x-agent-server-tls
+  clientCaSecretName: aiops-x-agent-ca
+
+resources:
+  api:
+    requests: {cpu: 250m, memory: 384Mi}
+    limits: {cpu: "1", memory: 1Gi}
+  worker:
+    requests: {cpu: 250m, memory: 384Mi}
+    limits: {cpu: "2", memory: 1Gi}
+  beat:
+    requests: {cpu: 50m, memory: 128Mi}
+    limits: {cpu: 250m, memory: 384Mi}
+  aiEngine:
+    requests: {cpu: 100m, memory: 192Mi}
+    limits: {cpu: "1", memory: 768Mi}
+  web:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {cpu: 250m, memory: 256Mi}
+  agentGateway:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {cpu: 250m, memory: 256Mi}
+  backup:
+    requests: {cpu: 100m, memory: 256Mi}
+    limits: {cpu: "1", memory: 1Gi}
+
+autoscaling:
+  enabled: true
+  api: {minReplicas: 2, maxReplicas: 8, targetCPUUtilizationPercentage: 70}
+  worker: {minReplicas: 2, maxReplicas: 10, targetCPUUtilizationPercentage: 70}
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+networkPolicy:
+  enabled: true
+  ingressNamespace: ingress-nginx
+  monitoringNamespace: monitoring
+  # Explicitly replace in production with the CIDRs of managed dependencies.
+  dependencyCidrs: []
+
+backup:
+  enabled: false
+  schedule: "15 2 * * *"
+  databaseService: aiops_x_backup
+  objectAlias: backup-source
+  bucket: aiops-backups
+  retentionDays: 35
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

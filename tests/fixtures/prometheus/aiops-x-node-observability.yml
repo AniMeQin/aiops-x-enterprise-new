@@ -1,0 +1,23 @@
+groups:
+  - name: aiops-x-node-observability-fixture
+    rules:
+      - alert: AIOpsXNodeMetricsFlowTest
+        expr: up{job="node"} == 1
+        for: 30s
+        labels:
+          severity: warning
+          service: node-observability
+          validation: first-e2e
+        annotations:
+          summary: "测试环境节点指标链路告警"
+          description: "仅用于验收夹具；使用前必须替换为已创建的项目和资产标识。"
+
+      - alert: AIOpsXNodeExporterDown
+        expr: up{job="node"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: node-observability
+        annotations:
+          summary: "测试环境节点指标采集不可用"
+          description: "仅用于验收夹具；Prometheus 已连续一分钟无法抓取节点指标。"

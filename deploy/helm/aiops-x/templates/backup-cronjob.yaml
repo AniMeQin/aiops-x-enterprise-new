@@ -1,0 +1,83 @@
+{{- if .Values.backup.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "aiops-x.fullname" . }}-postgresql-backup
+  labels: {{- include "aiops-x.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.backup.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: {{ .Values.backup.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ .Values.backup.failedJobsHistoryLimit }}
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 7200
+      template:
+        metadata:
+          labels:
+            {{- include "aiops-x.labels" . | nindent 12 }}
+            app.kubernetes.io/component: backup
+        spec:
+          restartPolicy: Never
+          serviceAccountName: {{ include "aiops-x.fullname" . }}-worker
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 999
+            runAsGroup: 999
+            fsGroup: 999
+            seccompProfile: {type: RuntimeDefault}
+          imagePullSecrets: {{ toYaml .Values.imagePullSecrets | nindent 12 }}
+          initContainers:
+            - name: prepare-backup-identity
+              image: {{ include "aiops-x.image" (list .Values.images.backup .) }}
+              imagePullPolicy: {{ .Values.images.backup.pullPolicy }}
+              command: ["/bin/sh", "-ec"]
+              args:
+                - >-
+                  cp /identity-source/pg_service.conf /identity/pg_service.conf &&
+                  cp /identity-source/config.json /identity/config.json &&
+                  chmod 0600 /identity/pg_service.conf /identity/config.json
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                runAsUser: 999
+                runAsGroup: 999
+                runAsNonRoot: true
+                capabilities: {drop: ["ALL"]}
+              resources:
+                requests: {cpu: 10m, memory: 16Mi}
+                limits: {cpu: 100m, memory: 64Mi}
+              volumeMounts:
+                - {name: backup-identity-source, mountPath: /identity-source, readOnly: true}
+                - {name: backup-identity, mountPath: /identity}
+          containers:
+            - name: backup
+              image: {{ include "aiops-x.image" (list .Values.images.backup .) }}
+              imagePullPolicy: {{ .Values.images.backup.pullPolicy }}
+              args: ["--output-root", "/backup", "--database-service", {{ .Values.backup.databaseService | quote }}]
+              env:
+                - {name: PGSERVICEFILE, value: /run/backup/pg_service.conf}
+                - {name: MC_CONFIG_DIR, value: /run/backup}
+                - {name: AIOPS_BACKUP_MC_ALIAS, value: {{ .Values.backup.objectAlias | quote }}}
+                - {name: AIOPS_BACKUP_BUCKET, value: {{ .Values.backup.bucket | quote }}}
+              securityContext: {{- include "aiops-x.containerSecurityContext" . | nindent 16 }}
+              resources: {{ toYaml .Values.resources.backup | nindent 16 }}
+              volumeMounts:
+                - {name: scratch, mountPath: /backup}
+                - {name: backup-identity, mountPath: /run/backup, readOnly: true}
+          volumes:
+            - {name: scratch, emptyDir: {sizeLimit: 20Gi}}
+            - name: backup-identity
+              emptyDir: {medium: Memory, sizeLimit: 1Mi}
+            - name: backup-identity-source
+              secret:
+                secretName: {{ .Values.existingSecrets.backup }}
+                # 0440 lets only root and the Pod fsGroup (999) read the
+                # source. The init container copies it into memory as 0600.
+                defaultMode: 288
+                items:
+                  - {key: pg_service.conf, path: pg_service.conf}
+                  - {key: mc-config.json, path: config.json}
+{{- end }}

@@ -1,0 +1,23 @@
+[Unit]
+Description=AIOps-X Enterprise Edge Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=aiops-x
+Group=aiops-x
+EnvironmentFile=/etc/aiops-x/edge-agent.env
+ExecStart=/usr/local/bin/aiops-x-edge-agent
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/aiops-x /var/log/aiops-x
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

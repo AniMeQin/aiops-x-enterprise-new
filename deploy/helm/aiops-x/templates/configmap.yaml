@@ -1,0 +1,81 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "aiops-x.fullname" . }}-config
+  labels: {{- include "aiops-x.labels" . | nindent 4 }}
+data:
+  AIOPS_ENVIRONMENT: {{ .Values.config.environment | quote }}
+  AIOPS_LOG_LEVEL: {{ .Values.config.logLevel | quote }}
+  AIOPS_CORS_ORIGINS: {{ .Values.config.corsOrigins | quote }}
+  AIOPS_NATS_URL: {{ .Values.config.natsUrl | quote }}
+  AIOPS_MINIO_ENDPOINT: {{ .Values.config.minioEndpoint | quote }}
+  AIOPS_MINIO_SECURE: {{ .Values.config.minioSecure | quote }}
+  AIOPS_PROMETHEUS_URL: {{ .Values.config.prometheusUrl | quote }}
+  AIOPS_LOKI_URL: {{ .Values.config.lokiUrl | quote }}
+  AIOPS_TEMPO_URL: {{ .Values.config.tempoUrl | quote }}
+  AIOPS_AI_ENGINE_URL: {{ printf "http://%s-ai-engine:8001" (include "aiops-x.fullname" .) | quote }}
+  AIOPS_VAULT_ADDR: {{ .Values.config.vaultAddr | quote }}
+  AIOPS_VAULT_KV_MOUNT: {{ .Values.config.vaultKvMount | quote }}
+  AIOPS_VAULT_TOKEN_FILE: /run/secrets/vault-token
+  AIOPS_SECRET_PROVIDER: vault
+  AIOPS_OIDC_ENABLED: {{ .Values.config.oidcEnabled | quote }}
+  AIOPS_OIDC_ISSUER_URL: {{ .Values.config.oidcIssuerUrl | quote }}
+  AIOPS_OIDC_CLIENT_ID: {{ .Values.config.oidcClientId | quote }}
+  AIOPS_ABAC_ENFORCED: "true"
+  AIOPS_OIDC_REDIRECT_URI: {{ .Values.config.oidcRedirectUri | quote }}
+  AIOPS_OTEL_EXPORTER_OTLP_ENDPOINT: {{ .Values.config.otlpEndpoint | quote }}
+  AIOPS_OUTBOUND_ALLOWED_HOSTS: {{ .Values.config.outboundAllowedHosts | toJson | quote }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "aiops-x.fullname" . }}-nginx
+  labels: {{- include "aiops-x.labels" . | nindent 4 }}
+data:
+  web.conf: |
+    server {
+      listen 8080;
+      server_name _;
+      add_header X-Content-Type-Options "nosniff" always;
+      add_header X-Frame-Options "DENY" always;
+      add_header Referrer-Policy "no-referrer" always;
+      add_header Content-Security-Policy "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'" always;
+      location /api/ {
+        proxy_pass http://{{ include "aiops-x.fullname" . }}-api:8000/api/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Request-ID $request_id;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-SSL-Client-Verify "";
+        proxy_set_header X-SSL-Client-Serial "";
+        proxy_set_header X-SSL-Client-Cert "";
+      }
+      location / { root /usr/share/nginx/html; try_files $uri $uri/ /index.html; }
+    }
+  agent-gateway.conf: |
+    server {
+      listen 8443 ssl;
+      server_name _;
+      ssl_certificate /etc/aiops-x/server/tls.crt;
+      ssl_certificate_key /etc/aiops-x/server/tls.key;
+      ssl_client_certificate /etc/aiops-x/client-ca/ca.crt;
+      ssl_verify_client optional;
+      ssl_verify_depth 2;
+      ssl_protocols TLSv1.2 TLSv1.3;
+      ssl_session_tickets off;
+      client_max_body_size 128k;
+      location = /api/v1/agents/enroll {
+        if ($ssl_client_verify = SUCCESS) { return 403; }
+        proxy_pass http://{{ include "aiops-x.fullname" . }}-api:8000/api/v1/agents/enroll;
+        proxy_set_header X-SSL-Client-Verify "";
+        proxy_set_header X-SSL-Client-Serial "";
+        proxy_set_header X-SSL-Client-Cert "";
+      }
+      location /api/v1/agents/ {
+        if ($ssl_client_verify != SUCCESS) { return 496; }
+        proxy_pass http://{{ include "aiops-x.fullname" . }}-api:8000;
+        proxy_set_header X-SSL-Client-Verify $ssl_client_verify;
+        proxy_set_header X-SSL-Client-Serial $ssl_client_serial;
+        proxy_set_header X-SSL-Client-Cert $ssl_client_escaped_cert;
+      }
+    }

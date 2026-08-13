@@ -1,0 +1,42 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.9.28"
+          enable-cache: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.22.0"
+          cache: npm
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.6"
+          cache-dependency-path: agents/edge-agent/go.sum
+      - uses: azure/setup-helm@v4.3.0
+        with:
+          version: v3.18.6
+      - uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.4.0
+          working-directory: agents/edge-agent
+      - run: uv sync --all-groups --frozen
+      - run: npm ci
+      - run: make check
+      - run: make e2e

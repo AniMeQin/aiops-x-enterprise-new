@@ -1,0 +1,1 @@
+"""Replaceable telemetry query adapters."""

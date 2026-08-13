@@ -1,0 +1,1 @@
+"""Reporting storage adapters."""

@@ -1,0 +1,125 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: {{ include "aiops-x.fullname" . }}-default-deny}
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/instance: {{ .Release.Name }}}}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: {{ include "aiops-x.fullname" . }}-dns-egress}
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/instance: {{ .Release.Name }}}}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}
+          podSelector: {matchLabels: {k8s-app: kube-dns}}
+      ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: {{ include "aiops-x.fullname" . }}-web-api}
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: api}}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: {matchLabels: {app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: web}}
+        {{- if .Values.agentGateway.enabled }}
+        - podSelector: {matchLabels: {app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: agent-gateway}}
+        {{- end }}
+      ports: [{protocol: TCP, port: 8000}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: {{ include "aiops-x.fullname" . }}-proxy-egress}
+spec:
+  podSelector:
+    matchExpressions:
+      - {key: app.kubernetes.io/instance, operator: In, values: [{{ .Release.Name }}]}
+      - {key: app.kubernetes.io/component, operator: In, values: [web, agent-gateway]}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector: {matchLabels: {app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: api}}
+      ports: [{protocol: TCP, port: 8000}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: {{ include "aiops-x.fullname" . }}-api-ai-engine}
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: ai-engine}}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: {matchLabels: {app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: api}}
+      ports: [{protocol: TCP, port: 8001}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: {{ include "aiops-x.fullname" . }}-api-ai-engine-egress}
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: api}}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector: {matchLabels: {app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: ai-engine}}
+      ports: [{protocol: TCP, port: 8001}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: {{ include "aiops-x.fullname" . }}-web-ingress}
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: web}}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: {{ .Values.networkPolicy.ingressNamespace }}}}
+      ports: [{protocol: TCP, port: 8080}]
+{{- if .Values.agentGateway.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: {{ include "aiops-x.fullname" . }}-agent-public-ingress}
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: agent-gateway}}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - ipBlock: {cidr: 0.0.0.0/0}
+      ports: [{protocol: TCP, port: 8443}]
+{{- end }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: {{ include "aiops-x.fullname" . }}-metrics-ingress}
+spec:
+  podSelector:
+    matchExpressions:
+      - {key: app.kubernetes.io/instance, operator: In, values: [{{ .Release.Name }}]}
+      - {key: app.kubernetes.io/component, operator: In, values: [api, worker, ai-engine]}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: {{ .Values.networkPolicy.monitoringNamespace }}}}
+      ports:
+        - {protocol: TCP, port: 8000}
+        - {protocol: TCP, port: 8001}
+        - {protocol: TCP, port: 8002}
+{{- if .Values.networkPolicy.dependencyCidrs }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: {{ include "aiops-x.fullname" . }}-dependency-egress}
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/instance: {{ .Release.Name }}}}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        {{- range .Values.networkPolicy.dependencyCidrs }}
+        - ipBlock: {cidr: {{ . | quote }}}
+        {{- end }}
+{{- end }}
+{{- end }}
