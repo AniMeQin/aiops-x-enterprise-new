@@ -25,6 +25,7 @@ from aiops_x_api.modules.audit.api import router as audit_router
 from aiops_x_api.modules.automation.api import router as automation_router
 from aiops_x_api.modules.change.api import router as change_router
 from aiops_x_api.modules.cmdb.api import router as cmdb_router
+from aiops_x_api.modules.discovery.api import router as discovery_router
 from aiops_x_api.modules.evidence.api import router as evidence_router
 from aiops_x_api.modules.identity.api import router as identity_router
 from aiops_x_api.modules.identity.enterprise_api import router as identity_enterprise_router
@@ -174,6 +175,7 @@ def create_app() -> FastAPI:
     application.include_router(oidc_router, prefix="/api/v1")
     application.include_router(tenant_router, prefix="/api/v1")
     application.include_router(cmdb_router, prefix="/api/v1")
+    application.include_router(discovery_router, prefix="/api/v1")
     application.include_router(audit_router, prefix="/api/v1")
     application.include_router(agent_router, prefix="/api/v1")
     application.include_router(operations_router, prefix="/api/v1")

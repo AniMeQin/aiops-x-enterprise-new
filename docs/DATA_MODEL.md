@@ -1,6 +1,6 @@
 # 数据模型
 
-当前工作区模型对应 Alembic `0015_monitor_target_binding`；该迁移尚未部署到测试环境。测试
+当前工作区模型对应 Alembic `0016_discovery_control_plane`；该迁移尚未部署到测试环境。测试
 环境仍停在 `0014_security_center`，详见 `docs/STATUS.md`。
 
 ```mermaid
@@ -13,6 +13,10 @@ erDiagram
   Asset ||--o{ AssetRelation : relates
   Asset ||--o| AssetMonitorBinding : monitored_by
   MonitorTarget ||--|| AssetMonitorBinding : identifies
+  Project ||--o{ DiscoveryJob : configures
+  DiscoveryJob ||--o{ DiscoveryRun : executes
+  DiscoveryJob ||--o{ DiscoveryCandidate : observes
+  DiscoveryCandidate }o--o| Asset : confirms_as
   Asset ||--o{ Alert : emits
   Alert }o--o{ OperationsEvent : correlates
   OperationsEvent ||--o{ Incident : escalates
@@ -35,6 +39,9 @@ erDiagram
 - Monitoring：`MonitorTarget`、`AssetMonitorBinding`。绑定保存 Prometheus job/instance、
   tenant/project 标签快照和资产身份标签；数据库及 API 共同阻止同一项目中的重复目标和
   同一资产用途的重复绑定。
+- Discovery：`DiscoveryJob`、`DiscoveryRun`、`DiscoveryCandidate`。任务只接受有界 RFC1918
+  IPv4 网段；运行记录真实状态和计数；候选保存版本化观测证据、稳定指纹、人工审查状态及
+  可选 Asset 外键。
 - Agent：`AgentRegistrationToken`、`EdgeAgent`、`AgentTask`。
 - Operations：`Alert`、`OperationsEvent`、`EventAlert`、`EventTimelineEntry`、
   `MaintenanceWindow`。
@@ -50,8 +57,17 @@ erDiagram
 - Audit/Events：`AuditLog`、`EventOutbox`。
 
 实体存在只表示 schema/代码已实现，不代表上游真实发现、采集、厂商适配或产品工作流已经
-完成。当前发现实体、设备/接口/服务/容器/Kubernetes/数据库监控实体，以及规则版本和发布
-实体仍待后续阶段设计和迁移。
+完成。当前发现任务与候选链已存在；设备/接口/服务/容器/Kubernetes/数据库监控实体，以及
+规则版本和发布实体仍待后续阶段设计和迁移。
+
+## 发现候选与 CMDB 约束
+
+1. 单任务最多 256 台主机和 16 个端口，生产后端只做私网 TCP connect，不接收或保存凭据。
+2. 每次成功观测写入 `discovery.observation.v1` 证据；重复发现按租户/项目/IP 稳定指纹校准。
+3. 未再次观测到的未确认候选变为 `stale`；已确认资产不会被扫描结果自动退役。
+4. 候选默认不能被监控或自动化当成正式资产。只有管理员确认后才能关联同项目同 IP 的现有
+   Asset，或创建监控状态为 `not_configured` 的新 Asset。
+5. 发现成功不代表监控成功；仍需后续建立并实时验证唯一 MonitorTarget/Binding。
 
 ## 监控绑定与数据正确性约束
 

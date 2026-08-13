@@ -1,6 +1,6 @@
 # 项目状态
 
-更新时间：2026-08-13 19:10（Asia/Shanghai）
+更新时间：2026-08-13 20:20（Asia/Shanghai）
 
 ## 当前结论
 
@@ -43,6 +43,21 @@ Phase 1 — Architecture 的代码整改已完成开发级复审：
 - Phase 1 复评分为 59/100，Architecture 7、API 8 达到该维度开发门槛；总分及其他强制
   维度仍不达标，正式测试/部署继续冻结。
 
+Phase 2 — Data Pipeline 当前完成了“发现候选纵向切片”，但整个 Phase 尚未完成：
+
+- 新增 `discovery_jobs`、`discovery_runs`、`discovery_candidates` 及迁移 `0016`；所有记录均
+  受租户、项目和外键约束。
+- 实现有界的 RFC1918 IPv4 TCP connect 发现：最多 256 主机、16 端口，网络 I/O 不占用
+  数据库事务；不接收公网网段，不保存密码，也不伪造设备识别结果。
+- 每条候选保存 `discovery.observation.v1` 证据和稳定指纹；重复运行增量更新，未再次观测的
+  pending 候选标记 stale，已确认资产不会被自动退役。
+- 候选必须由有权限的管理员显式确认，才可关联同项目同 IP 的现有 Asset 或创建新 Asset；
+  新资产保持 `monitoring_status=not_configured`，不会被冒充为已监控。
+- 开发 E2E 使用可记录的发现端口替身验证编排和数据状态，未执行真实网段扫描；真实后端是
+  `AsyncTcpDiscoveryBackend`，不存在固定成功响应。
+- 本切片复评分为 61/100；Phase 2 仍缺设备/接口/服务/容器/数据库实体、发现调度和
+  候选→唯一监控绑定控制器，正式测试/部署继续冻结。
+
 Phase 0 仍有以下阻断项：
 
 - Git 仓库的敏感信息/大文件/生成物清查已通过；已从同一内容的本机无元数据快照建立
@@ -66,6 +81,8 @@ Phase 0 仍有以下阻断项：
 - Compose：使用 `.env.example` 的静态 `config --quiet` 通过；本机 Docker daemon 未运行，
   未执行容器构建或运行态测试。
 - PostgreSQL 15 最小 `0014→0015→0014→0015`：通过，服务日志无 ERROR/FATAL/PANIC。
+- PostgreSQL 15 最小 `0015→0016→0015→0016`：通过，3 张发现表可创建/回退，候选表 8 个
+  PK/Unique/FK 约束符合预期；因本机无 pgvector，这不等于完整 `0001→0016` 历史链。
 - Python `py_compile`：First E2E、monitoring、operations 与 `0015` 迁移通过。
 - npm 隔离安装审计：0 vulnerabilities；Vite 仍提示已有大 chunk 警告，留待前端专项整改。
 
@@ -82,7 +99,8 @@ Phase 0 仍有以下阻断项：
 
 ## 下一步
 
-1. 进入 Phase 2，建设发现任务、候选资产、证据确认和受控接入监控的数据模型/API。
+1. 继续 Phase 2，补齐 Device/Interface/Service/Container/Database Instance、采集状态和
+   候选确认后受控建立唯一监控绑定；再进行完整 Phase 2 复审。
 2. 只有未来准入允许部署后，才在测试环境复验 Edge Agent Prometheus target、真实规则触发
    与恢复；文件修复不等于运行态生效。
 3. 正式数据库阶段补做完整旧库克隆升级、`alembic check`、备份恢复和回退兼容性验证。

@@ -21,6 +21,11 @@ from aiops_x_api.modules.change.infrastructure.models import (  # noqa: F401
     ChangeTimelineEntry,
 )
 from aiops_x_api.modules.cmdb.infrastructure.models import Asset, AssetRelation  # noqa: F401
+from aiops_x_api.modules.discovery.infrastructure.models import (  # noqa: F401
+    DiscoveryCandidate,
+    DiscoveryJob,
+    DiscoveryRun,
+)
 from aiops_x_api.modules.evidence.infrastructure.models import EvidenceRecord  # noqa: F401
 from aiops_x_api.modules.identity.infrastructure.models import (  # noqa: F401
     ApiToken,

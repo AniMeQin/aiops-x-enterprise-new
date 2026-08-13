@@ -50,6 +50,7 @@ Collector、Loki、Tempo 和 Grafana。声明服务不等于当前运行态已�
 - `agent_control`：一次性注册、可恢复的短期 mTLS 证书轮换、心跳和签名任务。
 - `operations`：Prometheus、Alert、Event、维护窗口和证据时间线。
 - `monitoring`：监控目标、资产唯一绑定、MetricsBackend 端口和 Prometheus Adapter。
+- `discovery`：受控私网 TCP 发现任务、运行记录、候选资产、观测证据和人工确认。
 - `automation`：Runbook 版本、策略、任务和审批。
 - `ai_gateway`：Evidence-first AI 状态与结构化分析。
 - `integrations`：外部适配器注册、版本、凭据引用和健康探测。

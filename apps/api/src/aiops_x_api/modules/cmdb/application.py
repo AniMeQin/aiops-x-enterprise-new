@@ -106,6 +106,69 @@ async def require_asset_refs(
     return [_asset_view(by_id[asset_id]) for asset_id in asset_ids]
 
 
+async def find_assets_by_ip(
+    session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    project_id: UUID,
+    ip_address: str,
+) -> list[AssetView]:
+    """Find exact IP matches without leaking CMDB ORM entities to callers."""
+    rows = (
+        await session.scalars(
+            select(Asset).where(
+                Asset.tenant_id == tenant_id,
+                Asset.project_id == project_id,
+                Asset.lifecycle_status != "retired",
+            )
+        )
+    ).all()
+    return [_asset_view(row) for row in rows if ip_address in row.ip_addresses]
+
+
+async def create_discovered_asset(
+    session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    project_id: UUID,
+    asset_id: str,
+    asset_type: str,
+    name: str,
+    hostname: str | None,
+    ip_addresses: list[str],
+    environment: str,
+    criticality: str,
+    gxp_classification: str,
+    tags: list[str],
+    discovery_metadata: dict[str, Any],
+) -> AssetView:
+    existing = await session.scalar(
+        select(Asset.id).where(Asset.tenant_id == tenant_id, Asset.asset_id == asset_id)
+    )
+    if existing is not None:
+        raise ApplicationError(code="AIOPS_3102", message="资产标识已存在", status_code=409)
+    asset = Asset(
+        tenant_id=tenant_id,
+        project_id=project_id,
+        asset_id=asset_id,
+        asset_type=asset_type,
+        name=name,
+        hostname=hostname,
+        ip_addresses=ip_addresses,
+        environment=environment,
+        criticality=criticality,
+        gxp_classification=gxp_classification,
+        tags=tags,
+        custom_attributes={"discovery": discovery_metadata},
+        lifecycle_status="active",
+        agent_status="not_installed",
+        monitoring_status="not_configured",
+    )
+    session.add(asset)
+    await session.flush()
+    return _asset_view(asset)
+
+
 def _asset_view(asset: Asset) -> AssetView:
     return AssetView(
         id=asset.id,
