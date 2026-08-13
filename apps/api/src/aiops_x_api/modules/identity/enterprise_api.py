@@ -37,7 +37,7 @@ from aiops_x_api.modules.identity.security import (
     require_permission,
     token_hash,
 )
-from aiops_x_api.modules.tenant.infrastructure.models import Project
+from aiops_x_api.modules.tenant.application import require_project_ids, require_project_scope
 
 router = APIRouter(prefix="/auth", tags=["identity-enterprise"])
 
@@ -331,14 +331,11 @@ async def create_project_membership(
 ) -> ProjectMembershipResponse:
     ensure_project_scope(principal, payload.project_id)
     async with session.begin():
-        project = await session.scalar(
-            select(Project.id).where(
-                Project.id == payload.project_id,
-                Project.tenant_id == principal.tenant_id,
-            )
+        await require_project_scope(
+            session,
+            tenant_id=principal.tenant_id,
+            project_id=payload.project_id,
         )
-        if project is None:
-            raise ApplicationError(code="AIOPS_3004", message="项目不存在", status_code=404)
         subject_model = User if payload.subject_type == "user" else IdentityGroup
         subject = await session.scalar(
             select(subject_model.id).where(
@@ -460,18 +457,11 @@ async def create_api_token(
         ensure_project_scope(principal, project_id)
     raw_token = "axt_" + secrets.token_urlsafe(48)
     async with session.begin():
-        valid_projects = set(
-            (
-                await session.scalars(
-                    select(Project.id).where(
-                        Project.tenant_id == principal.tenant_id,
-                        Project.id.in_(project_ids),
-                    )
-                )
-            ).all()
+        await require_project_ids(
+            session,
+            tenant_id=principal.tenant_id,
+            project_ids=project_ids,
         )
-        if valid_projects != project_ids:
-            raise ApplicationError(code="AIOPS_3004", message="项目不存在", status_code=404)
         token = ApiToken(
             token_id=f"TOK-{datetime.now(UTC):%Y%m%d}-{uuid4().hex[:8].upper()}",
             tenant_id=principal.tenant_id,

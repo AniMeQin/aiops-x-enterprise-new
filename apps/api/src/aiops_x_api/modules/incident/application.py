@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from aiops_x_api.core.errors import ApplicationError
 from aiops_x_api.modules.change.contracts import require_change_refs
 from aiops_x_api.modules.cmdb.application import require_asset_refs
-from aiops_x_api.modules.cmdb.infrastructure.models import Asset
+from aiops_x_api.modules.cmdb.contracts import AssetView
 from aiops_x_api.modules.incident.infrastructure.models import (
     Incident,
     IncidentPostmortem,
@@ -121,7 +121,7 @@ async def validate_incident_links(
     asset_ids: list[UUID],
     alert_ids: list[UUID],
     change_ids: list[UUID],
-) -> list[Asset]:
+) -> list[AssetView]:
     await require_event_ref(
         session,
         tenant_id=tenant_id,

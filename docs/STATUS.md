@@ -32,6 +32,17 @@ Phase 0 — Emergency Fix 正在进行，尚未完成：
 - First E2E 已改为只接受指定、已加载且健康的真实 Prometheus 规则；脚本不再手工注入
   Alertmanager 告警，并要求真实触发、身份匹配、规则恢复和事件恢复。
 
+Phase 1 — Architecture 的代码整改已完成开发级复审：
+
+- 业务模块跨域直接 ORM import 已降为 0；CMDB、Tenant、Agent、Operations、Automation
+  通过发布的 View/Scope、application 和 contracts 协作。
+- 新增架构依赖测试，阻止未来 Router/Application 重新直接导入其他领域 Model。
+- AI Gateway 的事件证据与状态写入归还 Operations 所有；Automation/Agent 的状态与事件
+  时间线写入分别经拥有者接口完成。
+- 所有 OpenAPI operation 全局声明统一 `ErrorResponse`，业务路由版本前缀由测试约束。
+- Phase 1 复评分为 59/100，Architecture 7、API 8 达到该维度开发门槛；总分及其他强制
+  维度仍不达标，正式测试/部署继续冻结。
+
 Phase 0 仍有以下阻断项：
 
 - Git 仓库的敏感信息/大文件/生成物清查已通过；已从同一内容的本机无元数据快照建立
@@ -71,7 +82,7 @@ Phase 0 仍有以下阻断项：
 
 ## 下一步
 
-1. 完成 Phase 0 复评分；若仍未达到总分和各强制维度门槛，继续 Phase 1，不进入正式测试或部署。
+1. 进入 Phase 2，建设发现任务、候选资产、证据确认和受控接入监控的数据模型/API。
 2. 只有未来准入允许部署后，才在测试环境复验 Edge Agent Prometheus target、真实规则触发
    与恢复；文件修复不等于运行态生效。
 3. 正式数据库阶段补做完整旧库克隆升级、`alembic check`、备份恢复和回退兼容性验证。

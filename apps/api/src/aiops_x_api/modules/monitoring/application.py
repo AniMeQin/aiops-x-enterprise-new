@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from aiops_x_api.core.config import get_settings
 from aiops_x_api.core.errors import ApplicationError
 from aiops_x_api.modules.cmdb.application import get_asset_for_scope
-from aiops_x_api.modules.cmdb.infrastructure.models import Asset
+from aiops_x_api.modules.cmdb.contracts import AssetView
 from aiops_x_api.modules.monitoring.contracts import MetricSample, MetricsBackend
 from aiops_x_api.modules.monitoring.infrastructure.models import AssetMonitorBinding, MonitorTarget
 
@@ -39,7 +39,7 @@ def _escape_label(value: str) -> str:
 
 async def get_binding_for_asset(
     session: AsyncSession, *, tenant_id: UUID, asset_id: UUID
-) -> tuple[Asset, MonitorTarget, AssetMonitorBinding]:
+) -> tuple[AssetView, MonitorTarget, AssetMonitorBinding]:
     asset = await get_asset_for_scope(session, tenant_id=tenant_id, asset_id=asset_id)
     row = (
         await session.execute(
@@ -187,7 +187,7 @@ async def require_alert_binding(
     session: AsyncSession,
     backend: MetricsBackend,
     *,
-    asset: Asset,
+    asset: AssetView,
     labels: dict[str, str],
 ) -> VerifiedTarget:
     _, target, binding = await get_binding_for_asset(

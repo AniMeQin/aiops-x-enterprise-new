@@ -36,8 +36,10 @@ from aiops_x_api.modules.monitoring.schemas import (
     MonitorTargetVerificationResponse,
     NodeMetricsResponse,
 )
-from aiops_x_api.modules.tenant.application import get_project_in_tenant
-from aiops_x_api.modules.tenant.infrastructure.models import Tenant
+from aiops_x_api.modules.tenant.application import (
+    get_tenant_scope_by_id,
+    require_project_scope,
+)
 
 router = APIRouter(prefix="/monitoring", tags=["monitoring"])
 
@@ -101,10 +103,10 @@ async def create_monitor_target(
         tags=asset.tags,
         gxp_classification=asset.gxp_classification,
     )
-    project = await get_project_in_tenant(session, principal.tenant_id, payload.project_id)
-    tenant = await session.scalar(select(Tenant).where(Tenant.id == principal.tenant_id))
-    if tenant is None:
-        raise ApplicationError(code="AIOPS_2004", message="租户不存在", status_code=404)
+    project = await require_project_scope(
+        session, tenant_id=principal.tenant_id, project_id=payload.project_id
+    )
+    tenant = await get_tenant_scope_by_id(session, principal.tenant_id)
     try:
         async with session.begin_nested():
             target = MonitorTarget(

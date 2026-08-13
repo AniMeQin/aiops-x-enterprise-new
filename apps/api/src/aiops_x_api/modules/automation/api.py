@@ -10,7 +10,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from aiops_x_api.core.database import get_session
 from aiops_x_api.core.errors import ApplicationError
-from aiops_x_api.modules.agent_control.infrastructure.models import AgentTask, EdgeAgent
+from aiops_x_api.modules.agent_control.contracts import (
+    enqueue_automation_task,
+    require_online_agent_for_asset,
+)
 from aiops_x_api.modules.audit.application import append_audit
 from aiops_x_api.modules.automation.infrastructure.models import (
     ApprovalDecision,
@@ -31,19 +34,19 @@ from aiops_x_api.modules.automation.schemas import (
     RunbookResponse,
     RunbookVersionResponse,
 )
-from aiops_x_api.modules.cmdb.infrastructure.models import Asset
+from aiops_x_api.modules.cmdb.application import get_asset_for_scope
 from aiops_x_api.modules.identity.security import (
     Principal,
     ensure_project_scope,
     require_permission,
     scoped_project_ids,
 )
-from aiops_x_api.modules.operations.infrastructure.models import (
-    EventTimelineEntry,
-    MaintenanceWindow,
-    OperationsEvent,
+from aiops_x_api.modules.operations.contracts import (
+    append_automation_timeline,
+    maintenance_window_allows,
+    require_automation_event,
 )
-from aiops_x_api.modules.tenant.infrastructure.models import Project
+from aiops_x_api.modules.tenant.application import require_project_scope
 
 router = APIRouter(tags=["automation"])
 RISK_ORDER = {"R0": 0, "R1": 1, "R2": 2, "R3": 3, "R4": 4}
@@ -58,13 +61,9 @@ async def ensure_builtin_runbook(
 ) -> RunbookResponse:
     ensure_project_scope(principal, payload.project_id)
     async with session.begin():
-        project = await session.scalar(
-            select(Project).where(
-                Project.id == payload.project_id, Project.tenant_id == principal.tenant_id
-            )
+        project = await require_project_scope(
+            session, tenant_id=principal.tenant_id, project_id=payload.project_id
         )
-        if project is None:
-            raise ApplicationError(code="AIOPS_3004", message="项目不存在", status_code=404)
         runbook = await session.scalar(
             select(Runbook).where(
                 Runbook.tenant_id == principal.tenant_id,
@@ -209,14 +208,10 @@ async def create_automation_job(
             )
         _require_all_permissions(principal, version.required_permissions)
         inputs = _validate_inputs(version.input_schema, payload.inputs)
-        asset = await session.scalar(
-            select(Asset).where(
-                Asset.id == payload.asset_id,
-                Asset.tenant_id == principal.tenant_id,
-                Asset.project_id == runbook.project_id,
-            )
+        asset = await get_asset_for_scope(
+            session, tenant_id=principal.tenant_id, asset_id=payload.asset_id
         )
-        if asset is None:
+        if asset.project_id != runbook.project_id:
             raise ApplicationError(
                 code="AIOPS_3104", message="资产不存在或超出 Runbook 项目范围", status_code=404
             )
@@ -224,34 +219,28 @@ async def create_automation_job(
             raise ApplicationError(
                 code="AIOPS_6101", message="Runbook 不适用于该资产类型", status_code=409
             )
-        agent = await session.scalar(
-            select(EdgeAgent).where(
-                EdgeAgent.asset_id == asset.id,
-                EdgeAgent.tenant_id == principal.tenant_id,
-                EdgeAgent.status == "online",
-            )
+        agent = await require_online_agent_for_asset(
+            session, tenant_id=principal.tenant_id, asset_id=asset.id
         )
-        if agent is None:
-            raise ApplicationError(code="AIOPS_4201", message="Agent 不在线", status_code=409)
         if version.action_id not in agent.capabilities.get("actions", []):
             raise ApplicationError(
                 code="AIOPS_4202", message="Agent 未上报该动作能力", status_code=409
             )
-        event = None
-        if payload.event_id is not None:
-            event = await session.scalar(
-                select(OperationsEvent).where(
-                    OperationsEvent.id == payload.event_id,
-                    OperationsEvent.tenant_id == principal.tenant_id,
-                    OperationsEvent.project_id == runbook.project_id,
-                    OperationsEvent.primary_asset_id == asset.id,
-                )
-            )
-            if event is None:
-                raise ApplicationError(
-                    code="AIOPS_5104", message="事件不存在或与资产范围不匹配", status_code=404
-                )
-        maintenance_ok = await _maintenance_allowed(session, version, asset, now)
+        event = await require_automation_event(
+            session,
+            tenant_id=principal.tenant_id,
+            project_id=runbook.project_id,
+            event_id=payload.event_id,
+            asset_id=asset.id,
+        )
+        maintenance_ok = await maintenance_window_allows(
+            session,
+            tenant_id=asset.tenant_id,
+            project_id=asset.project_id,
+            asset_id=asset.id,
+            required=version.maintenance_window_required,
+            now=now,
+        )
         if not maintenance_ok:
             raise ApplicationError(
                 code="AIOPS_6102", message="当前不在有效维护窗口内", status_code=409
@@ -302,9 +291,33 @@ async def create_automation_job(
                 )
             )
         else:
-            _queue_agent_task(session, job, version)
+            enqueue_automation_task(
+                session,
+                tenant_id=job.tenant_id,
+                project_id=job.project_id,
+                asset_id=job.asset_id,
+                agent_id=job.agent_id,
+                automation_job_id=job.id,
+                action_id=job.action_id,
+                parameters=job.inputs,
+                risk_level=job.risk_level,
+                created_by=job.requested_by,
+                timeout_seconds=version.timeout_seconds,
+            )
         if event is not None:
-            _append_job_timeline(session, event, job, "已发起只读巡检 Runbook", "queued")
+            append_automation_timeline(
+                session,
+                event=event,
+                job_id=job.id,
+                job_number=job.job_id,
+                runbook_id=job.runbook_id,
+                runbook_version=job.runbook_version,
+                action_id=job.action_id,
+                risk_level=job.risk_level,
+                status="queued",
+                title="已发起只读巡检 Runbook",
+                occurred_at=now,
+            )
         await append_audit(
             session,
             request,
@@ -498,7 +511,19 @@ async def decide_approval(
                     raise ApplicationError(
                         code="AIOPS_6006", message="Runbook 版本不存在", status_code=404
                     )
-                _queue_agent_task(session, job, version)
+                enqueue_automation_task(
+                    session,
+                    tenant_id=job.tenant_id,
+                    project_id=job.project_id,
+                    asset_id=job.asset_id,
+                    agent_id=job.agent_id,
+                    automation_job_id=job.id,
+                    action_id=job.action_id,
+                    parameters=job.inputs,
+                    risk_level=job.risk_level,
+                    created_by=job.requested_by,
+                    timeout_seconds=version.timeout_seconds,
+                )
         await append_audit(
             session,
             request,
@@ -635,77 +660,6 @@ def _require_all_permissions(principal: Principal, permissions: list[str]) -> No
             status_code=403,
             details={"missing_permissions": missing},
         )
-
-
-async def _maintenance_allowed(
-    session: AsyncSession, version: RunbookVersion, asset: Asset, now: datetime
-) -> bool:
-    if not version.maintenance_window_required:
-        return True
-    count = await session.scalar(
-        select(func.count())
-        .select_from(MaintenanceWindow)
-        .where(
-            MaintenanceWindow.tenant_id == asset.tenant_id,
-            MaintenanceWindow.project_id == asset.project_id,
-            MaintenanceWindow.enabled.is_(True),
-            MaintenanceWindow.starts_at <= now,
-            MaintenanceWindow.ends_at >= now,
-            (MaintenanceWindow.asset_id.is_(None)) | (MaintenanceWindow.asset_id == asset.id),
-        )
-    )
-    return (count or 0) > 0
-
-
-def _queue_agent_task(
-    session: AsyncSession, job: AutomationJob, version: RunbookVersion
-) -> AgentTask:
-    task = AgentTask(
-        tenant_id=job.tenant_id,
-        project_id=job.project_id,
-        asset_id=job.asset_id,
-        agent_id=job.agent_id,
-        automation_job_id=job.id,
-        action_id=job.action_id,
-        parameters=job.inputs,
-        risk_level=job.risk_level,
-        status="queued",
-        idempotency_key=f"automation-job:{job.id}",
-        created_by=job.requested_by,
-        expires_at=datetime.now(UTC) + timedelta(seconds=version.timeout_seconds),
-    )
-    session.add(task)
-    return task
-
-
-def _append_job_timeline(
-    session: AsyncSession,
-    event: OperationsEvent,
-    job: AutomationJob,
-    title: str,
-    status: str,
-) -> None:
-    session.add(
-        EventTimelineEntry(
-            tenant_id=event.tenant_id,
-            project_id=event.project_id,
-            event_id=event.id,
-            occurred_at=datetime.now(UTC),
-            category="automation",
-            title=title,
-            description=f"{job.job_id} / {job.action_id}",
-            source_type="automation_job",
-            source_id=str(job.id),
-            evidence_refs=[],
-            metadata_json={
-                "job_id": job.job_id,
-                "runbook_id": str(job.runbook_id),
-                "runbook_version": job.runbook_version,
-                "risk_level": job.risk_level,
-                "status": status,
-            },
-        )
-    )
 
 
 def _human_id(prefix: str) -> str:

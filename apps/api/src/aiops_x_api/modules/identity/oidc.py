@@ -35,7 +35,7 @@ from aiops_x_api.modules.identity.infrastructure.models import (
     UserRole,
 )
 from aiops_x_api.modules.identity.security import generate_opaque_token, token_hash
-from aiops_x_api.modules.tenant.infrastructure.models import Tenant
+from aiops_x_api.modules.tenant.application import find_tenant_scope_by_slug
 
 router = APIRouter(prefix="/auth/oidc", tags=["oidc"])
 OIDC_CSRF_COOKIE = "aiops_x_oidc_csrf"
@@ -65,9 +65,7 @@ async def oidc_authorize(
     if not redirect_after.startswith("/") or redirect_after.startswith("//"):
         raise ApplicationError(code="AIOPS_2801", message="登录后跳转地址无效", status_code=422)
     metadata = await _provider_metadata()
-    tenant = await session.scalar(
-        select(Tenant).where(Tenant.slug == tenant_slug.strip().lower(), Tenant.status == "active")
-    )
+    tenant = await find_tenant_scope_by_slug(session, tenant_slug, active_only=True)
     if tenant is None:
         raise ApplicationError(code="AIOPS_2001", message="租户不存在或已停用", status_code=401)
     await session.rollback()

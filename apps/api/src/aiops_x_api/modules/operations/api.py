@@ -14,9 +14,14 @@ from aiops_x_api.core.database import get_session
 from aiops_x_api.core.errors import ApplicationError
 from aiops_x_api.core.observability import ALERTS_INGESTED
 from aiops_x_api.modules.audit.application import append_audit
-from aiops_x_api.modules.automation.infrastructure.models import AutomationJob
-from aiops_x_api.modules.cmdb.application import dependency_correlation_key
-from aiops_x_api.modules.cmdb.infrastructure.models import Asset
+from aiops_x_api.modules.automation.contracts import list_event_automation_jobs
+from aiops_x_api.modules.cmdb.application import (
+    dependency_correlation_key,
+    get_asset_by_external_scope,
+    get_asset_for_scope,
+    update_asset_monitoring_status,
+)
+from aiops_x_api.modules.cmdb.contracts import AssetView
 from aiops_x_api.modules.identity.security import (
     Principal,
     ensure_asset_scope,
@@ -57,7 +62,8 @@ from aiops_x_api.modules.operations.schemas import (
     TimelineEntryResponse,
     WebhookResult,
 )
-from aiops_x_api.modules.tenant.infrastructure.models import Project, Tenant
+from aiops_x_api.modules.tenant.application import require_project_scope, resolve_project_scope
+from aiops_x_api.modules.tenant.contracts import ProjectScope, TenantScope
 
 router = APIRouter(tags=["operations"])
 SEVERITY_ORDER = {"info": 0, "warning": 1, "critical": 2}
@@ -111,22 +117,16 @@ async def create_maintenance_window(
     ensure_project_scope(principal, payload.project_id)
     starts_at, ends_at = _validated_window_range(payload.starts_at, payload.ends_at)
     async with session.begin():
-        project = await session.scalar(
-            select(Project).where(
-                Project.id == payload.project_id, Project.tenant_id == principal.tenant_id
-            )
+        await require_project_scope(
+            session,
+            tenant_id=principal.tenant_id,
+            project_id=payload.project_id,
         )
-        if project is None:
-            raise ApplicationError(code="AIOPS_3004", message="项目不存在", status_code=404)
         if payload.asset_id is not None:
-            asset = await session.scalar(
-                select(Asset).where(
-                    Asset.id == payload.asset_id,
-                    Asset.tenant_id == principal.tenant_id,
-                    Asset.project_id == payload.project_id,
-                )
+            asset = await get_asset_for_scope(
+                session, tenant_id=principal.tenant_id, asset_id=payload.asset_id
             )
-            if asset is None:
+            if asset.project_id != payload.project_id:
                 raise ApplicationError(
                     code="AIOPS_3104", message="资产不存在或与项目范围不匹配", status_code=404
                 )
@@ -309,9 +309,9 @@ async def get_event_detail(
     if event is None:
         raise ApplicationError(code="AIOPS_5104", message="事件不存在", status_code=404)
     ensure_project_scope(principal, event.project_id)
-    asset = await session.scalar(select(Asset).where(Asset.id == event.primary_asset_id))
-    if asset is None:
-        raise ApplicationError(code="AIOPS_3104", message="资产不存在", status_code=404)
+    asset = await get_asset_for_scope(
+        session, tenant_id=principal.tenant_id, asset_id=event.primary_asset_id
+    )
     ensure_asset_scope(
         principal,
         project_id=asset.project_id,
@@ -334,13 +334,7 @@ async def get_event_detail(
             .order_by(EventTimelineEntry.occurred_at.asc())
         )
     ).all()
-    jobs = (
-        await session.scalars(
-            select(AutomationJob)
-            .where(AutomationJob.event_id == event.id)
-            .order_by(AutomationJob.created_at.asc())
-        )
-    ).all()
+    jobs = await list_event_automation_jobs(session, event_id=event.id)
     return EventDetail(
         **EventResponse.model_validate(event).model_dump(),
         asset=EventAsset(
@@ -416,7 +410,12 @@ async def _ingest_alert(
         )
         session.add(alert)
         await session.flush()
-        asset.monitoring_status = "alerting" if incoming.status == "firing" else "monitored"
+        await update_asset_monitoring_status(
+            session,
+            tenant_id=tenant.id,
+            asset_id=asset.id,
+            monitoring_status="alerting" if incoming.status == "firing" else "monitored",
+        )
         outcome = "created" if incoming.status == "firing" else "resolved"
     else:
         alert = existing
@@ -428,12 +427,22 @@ async def _ingest_alert(
         if incoming.status == "resolved":
             alert.status = "resolved"
             alert.ends_at = _resolved_end(incoming, now)
-            asset.monitoring_status = "monitored"
+            await update_asset_monitoring_status(
+                session,
+                tenant_id=tenant.id,
+                asset_id=asset.id,
+                monitoring_status="monitored",
+            )
             outcome = "resolved"
         else:
             alert.status = "firing"
             alert.ends_at = None
-            asset.monitoring_status = "alerting"
+            await update_asset_monitoring_status(
+                session,
+                tenant_id=tenant.id,
+                asset_id=asset.id,
+                monitoring_status="alerting",
+            )
             outcome = "deduplicated"
 
     suppressed = await _inside_maintenance_window(session, tenant.id, project.id, asset.id, now)
@@ -467,7 +476,7 @@ async def _correlate_event(
     session: AsyncSession,
     request: Request,
     alert: Alert,
-    asset: Asset,
+    asset: AssetView,
     now: datetime,
     alert_outcome: str,
 ) -> OperationsEvent:
@@ -588,7 +597,7 @@ async def _correlate_event(
 
 async def _resolve_scope(
     session: AsyncSession, backend: MetricsBackend, labels: dict[str, str]
-) -> tuple[Tenant, Project, Asset, VerifiedTarget]:
+) -> tuple[TenantScope, ProjectScope, AssetView, VerifiedTarget]:
     tenant_slug = labels.get("aiops_tenant_slug", "")
     project_slug = labels.get("aiops_project_slug", "")
     external_asset_id = labels.get("aiops_asset_id", "")
@@ -598,23 +607,15 @@ async def _resolve_scope(
             message="Alertmanager 告警缺少租户、项目或资产范围标签",
             status_code=422,
         )
-    tenant = await session.scalar(select(Tenant).where(Tenant.slug == tenant_slug))
-    if tenant is None:
-        raise ApplicationError(code="AIOPS_5002", message="告警租户不存在", status_code=404)
-    project = await session.scalar(
-        select(Project).where(Project.tenant_id == tenant.id, Project.slug == project_slug)
+    tenant, project = await resolve_project_scope(
+        session, tenant_slug=tenant_slug, project_slug=project_slug
     )
-    if project is None:
-        raise ApplicationError(code="AIOPS_5003", message="告警项目不存在", status_code=404)
-    asset = await session.scalar(
-        select(Asset).where(
-            Asset.tenant_id == tenant.id,
-            Asset.project_id == project.id,
-            Asset.asset_id == external_asset_id,
-        )
+    asset = await get_asset_by_external_scope(
+        session,
+        tenant_id=tenant.id,
+        project_id=project.id,
+        external_asset_id=external_asset_id,
     )
-    if asset is None:
-        raise ApplicationError(code="AIOPS_5004", message="告警资产不存在", status_code=404)
     verified_target = await require_alert_binding(session, backend, asset=asset, labels=labels)
     return tenant, project, asset, verified_target
 

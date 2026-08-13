@@ -41,8 +41,17 @@ from aiops_x_api.modules.agent_control.schemas import (
 )
 from aiops_x_api.modules.agent_control.security import AgentPrincipal, get_current_agent
 from aiops_x_api.modules.audit.application import append_audit
-from aiops_x_api.modules.automation.infrastructure.models import AutomationJob
-from aiops_x_api.modules.cmdb.infrastructure.models import Asset
+from aiops_x_api.modules.automation.contracts import (
+    AutomationJobView,
+    cancel_queued_automation_job,
+    complete_automation_job,
+    start_automation_job,
+)
+from aiops_x_api.modules.cmdb.application import (
+    get_asset_for_scope,
+    update_asset_agent_state,
+)
+from aiops_x_api.modules.cmdb.contracts import AssetView
 from aiops_x_api.modules.identity.security import (
     Principal,
     ensure_project_scope,
@@ -51,9 +60,9 @@ from aiops_x_api.modules.identity.security import (
     scoped_project_ids,
     token_hash,
 )
-from aiops_x_api.modules.operations.infrastructure.models import (
-    EventTimelineEntry,
-    OperationsEvent,
+from aiops_x_api.modules.operations.contracts import (
+    AutomationEventScope,
+    append_automation_timeline,
 )
 
 router = APIRouter(prefix="/agents", tags=["agent-control"])
@@ -171,8 +180,13 @@ async def enroll_agent(
         )
         session.add(agent)
         registration.used_at = now
-        asset.agent_status = "registered"
-        asset.hostname = payload.hostname.strip()
+        await update_asset_agent_state(
+            session,
+            tenant_id=registration.tenant_id,
+            asset_id=asset.id,
+            agent_status="registered",
+            hostname=payload.hostname.strip(),
+        )
         await append_audit(
             session,
             request,
@@ -364,21 +378,20 @@ async def disable_agent(
             task.error_code = "AGENT_DISABLED"
             task.error_message = "Agent 已由管理员停用"
             if task.automation_job_id is not None:
-                job = await session.scalar(
-                    select(AutomationJob).where(AutomationJob.id == task.automation_job_id)
+                await cancel_queued_automation_job(
+                    session, job_id=task.automation_job_id, completed_at=now
                 )
-                if job is not None and job.status == "queued":
-                    job.status = "canceled"
-                    job.completed_at = now
-                    job.error_code = "AGENT_DISABLED"
-                    job.error_message = "Agent 已由管理员停用"
         agent.status = "disabled"
         agent.health_status = "unknown"
         agent.disabled_at = now
         agent.disabled_by = principal.user_id
         agent.disable_reason = payload.reason.strip()
-        asset = await _asset_in_tenant(session, principal.tenant_id, agent.asset_id)
-        asset.agent_status = "not_installed"
+        await update_asset_agent_state(
+            session,
+            tenant_id=principal.tenant_id,
+            asset_id=agent.asset_id,
+            agent_status="not_installed",
+        )
         await append_audit(
             session,
             request,
@@ -417,9 +430,13 @@ async def heartbeat(
         agent.capabilities = _validated_capabilities(payload.capabilities)
         agent.status = "online"
         agent.last_heartbeat_at = now
-        asset = await _asset_in_tenant(session, agent.tenant_id, agent.asset_id)
-        asset.agent_status = "online"
-        asset.hostname = agent.hostname
+        await update_asset_agent_state(
+            session,
+            tenant_id=agent.tenant_id,
+            asset_id=agent.asset_id,
+            agent_status="online",
+            hostname=agent.hostname,
+        )
         tenant_online = await session.scalar(
             select(func.count())
             .select_from(EdgeAgent)
@@ -532,17 +549,9 @@ async def next_task(
         task.started_at = now
         automation_job = None
         if task.automation_job_id is not None:
-            automation_job = await session.scalar(
-                select(AutomationJob)
-                .where(AutomationJob.id == task.automation_job_id)
-                .with_for_update()
+            automation_job = await start_automation_job(
+                session, job_id=task.automation_job_id, started_at=now
             )
-            if automation_job is None or automation_job.status != "queued":
-                raise ApplicationError(
-                    code="AIOPS_6205", message="自动化任务状态冲突", status_code=409
-                )
-            automation_job.status = "running"
-            automation_job.started_at = now
         signing_payload = canonical_task_payload(
             {
                 "action_id": task.action_id,
@@ -610,60 +619,47 @@ async def submit_task_result(
         task.error_code = payload.error_code
         task.error_message = payload.error_message
         task.completed_at = datetime.now(UTC)
-        automation_job = None
+        automation_job: AutomationJobView | None = None
         if task.automation_job_id is not None:
-            automation_job = await session.scalar(
-                select(AutomationJob)
-                .where(AutomationJob.id == task.automation_job_id)
-                .with_for_update()
+            automation_job = await complete_automation_job(
+                session,
+                job_id=task.automation_job_id,
+                status=payload.status,
+                started_at=task.started_at,
+                completed_at=task.completed_at,
+                duration_ms=payload.duration_ms,
+                sanitized_output=payload.sanitized_output,
+                error_code=payload.error_code,
+                error_message=payload.error_message,
             )
-            if automation_job is None:
-                raise ApplicationError(
-                    code="AIOPS_6204", message="自动化任务不存在", status_code=409
-                )
-            automation_job.status = payload.status
-            automation_job.started_at = task.started_at
-            automation_job.completed_at = task.completed_at
-            automation_job.duration_ms = payload.duration_ms
-            automation_job.sanitized_output = payload.sanitized_output
-            automation_job.error_code = payload.error_code
-            automation_job.error_message = payload.error_message
             if automation_job.event_id is not None:
-                event = await session.scalar(
-                    select(OperationsEvent).where(OperationsEvent.id == automation_job.event_id)
+                append_automation_timeline(
+                    session,
+                    event=AutomationEventScope(
+                        id=automation_job.event_id,
+                        tenant_id=automation_job.tenant_id,
+                        project_id=automation_job.project_id,
+                    ),
+                    job_id=automation_job.id,
+                    job_number=automation_job.job_id,
+                    runbook_id=automation_job.runbook_id,
+                    runbook_version=automation_job.runbook_version,
+                    action_id=automation_job.action_id,
+                    risk_level=automation_job.risk_level,
+                    status=payload.status,
+                    title=(
+                        "Runbook 执行成功" if payload.status == "succeeded" else "Runbook 执行失败"
+                    ),
+                    occurred_at=task.completed_at,
+                    evidence_refs=[
+                        {
+                            "type": "agent_task_result",
+                            "task_id": str(task.id),
+                            "duration_ms": payload.duration_ms,
+                            "sanitized_output": payload.sanitized_output,
+                        }
+                    ],
                 )
-                if event is not None:
-                    session.add(
-                        EventTimelineEntry(
-                            tenant_id=event.tenant_id,
-                            project_id=event.project_id,
-                            event_id=event.id,
-                            occurred_at=task.completed_at,
-                            category="automation",
-                            title=(
-                                "Runbook 执行成功"
-                                if payload.status == "succeeded"
-                                else "Runbook 执行失败"
-                            ),
-                            description=f"{automation_job.job_id} / {task.action_id}",
-                            source_type="automation_job",
-                            source_id=str(automation_job.id),
-                            evidence_refs=[
-                                {
-                                    "type": "agent_task_result",
-                                    "task_id": str(task.id),
-                                    "duration_ms": payload.duration_ms,
-                                    "sanitized_output": payload.sanitized_output,
-                                }
-                            ],
-                            metadata_json={
-                                "job_id": automation_job.job_id,
-                                "status": payload.status,
-                                "runbook_id": str(automation_job.runbook_id),
-                                "runbook_version": automation_job.runbook_version,
-                            },
-                        )
-                    )
         await append_audit(
             session,
             request,
@@ -736,13 +732,8 @@ async def list_agent_tasks(
     )
 
 
-async def _asset_in_tenant(session: AsyncSession, tenant_id: UUID, asset_id: UUID) -> Asset:
-    asset = await session.scalar(
-        select(Asset).where(Asset.id == asset_id, Asset.tenant_id == tenant_id)
-    )
-    if asset is None:
-        raise ApplicationError(code="AIOPS_3104", message="资产不存在", status_code=404)
-    return asset
+async def _asset_in_tenant(session: AsyncSession, tenant_id: UUID, asset_id: UUID) -> AssetView:
+    return await get_asset_for_scope(session, tenant_id=tenant_id, asset_id=asset_id)
 
 
 async def _agent_by_id(session: AsyncSession, agent_id: UUID) -> EdgeAgent:

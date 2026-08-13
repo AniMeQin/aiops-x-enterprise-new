@@ -1,5 +1,6 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any
 
 import structlog
 from fastapi import FastAPI, Request
@@ -11,7 +12,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from aiops_x_api import __version__
 from aiops_x_api.core.config import get_settings
 from aiops_x_api.core.database import database_is_ready, get_engine
-from aiops_x_api.core.errors import ApplicationError
+from aiops_x_api.core.errors import ApplicationError, ErrorResponse
 from aiops_x_api.core.logging import configure_logging
 from aiops_x_api.core.observability import MetricsMiddleware, metrics_response
 from aiops_x_api.core.rate_limit import RateLimitMiddleware
@@ -44,6 +45,21 @@ from aiops_x_api.modules.tenant.api import router as tenant_router
 from aiops_x_api.modules.topology.api import router as topology_router
 
 logger = structlog.get_logger()
+STANDARD_ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
+    status: {"model": ErrorResponse, "description": description}
+    for status, description in {
+        400: "Bad request",
+        401: "Authentication required or invalid",
+        403: "Permission or policy denied",
+        404: "Resource not found",
+        409: "State or uniqueness conflict",
+        422: "Validation or scope failure",
+        429: "Rate limit exceeded",
+        500: "Sanitized internal service error",
+        502: "Upstream response invalid",
+        503: "Required dependency unavailable",
+    }.items()
+}
 
 
 @asynccontextmanager
@@ -85,6 +101,7 @@ def create_app() -> FastAPI:
         docs_url="/docs" if not settings.is_production else None,
         redoc_url=None,
         lifespan=lifespan,
+        responses=STANDARD_ERROR_RESPONSES,
     )
     application.add_middleware(RateLimitMiddleware)
     application.add_middleware(SecurityHeadersMiddleware)

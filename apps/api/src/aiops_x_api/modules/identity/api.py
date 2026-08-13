@@ -35,7 +35,10 @@ from aiops_x_api.modules.identity.security import (
     token_hash,
     verify_password,
 )
-from aiops_x_api.modules.tenant.infrastructure.models import Tenant
+from aiops_x_api.modules.tenant.application import (
+    create_tenant_scope,
+    find_tenant_scope_by_slug,
+)
 
 router = APIRouter(prefix="/auth", tags=["identity"])
 REFRESH_COOKIE = "aiops_x_refresh"
@@ -67,13 +70,13 @@ async def bootstrap(
         user_count = await session.scalar(select(func.count()).select_from(User))
         if (user_count or 0) != 0:
             raise ApplicationError(code="AIOPS_2102", message="平台已经完成初始化", status_code=409)
-        tenant = await session.scalar(select(Tenant).where(Tenant.slug == payload.tenant_slug))
+        tenant = await find_tenant_scope_by_slug(session, payload.tenant_slug)
         if tenant is None:
-            tenant = Tenant(
-                name=payload.tenant_name.strip(), slug=payload.tenant_slug, status="active"
+            tenant = await create_tenant_scope(
+                session,
+                name=payload.tenant_name,
+                slug=payload.tenant_slug,
             )
-            session.add(tenant)
-            await session.flush()
         role = Role(
             tenant_id=tenant.id,
             name="platform_admin",
@@ -117,7 +120,7 @@ async def login(
     now = datetime.now(UTC)
     settings = get_settings()
     async with session.begin():
-        tenant = await session.scalar(select(Tenant).where(Tenant.slug == payload.tenant_slug))
+        tenant = await find_tenant_scope_by_slug(session, payload.tenant_slug)
         user = None
         if tenant is not None:
             user = await session.scalar(

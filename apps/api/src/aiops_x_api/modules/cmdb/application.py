@@ -5,16 +5,75 @@ from uuid import UUID
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aiops_x_api.core.errors import ApplicationError
+from aiops_x_api.modules.cmdb.contracts import AssetView
 from aiops_x_api.modules.cmdb.infrastructure.models import Asset, AssetRelation
 
 
-async def get_asset_for_scope(session: AsyncSession, *, tenant_id: UUID, asset_id: UUID) -> Asset:
+async def get_asset_for_scope(
+    session: AsyncSession, *, tenant_id: UUID, asset_id: UUID
+) -> AssetView:
     asset = await session.scalar(
         select(Asset).where(Asset.id == asset_id, Asset.tenant_id == tenant_id)
     )
     if asset is None:
-        from aiops_x_api.core.errors import ApplicationError
+        raise ApplicationError(code="AIOPS_3104", message="资产不存在", status_code=404)
+    return _asset_view(asset)
 
+
+async def get_asset_by_external_scope(
+    session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    project_id: UUID,
+    external_asset_id: str,
+) -> AssetView:
+    asset = await session.scalar(
+        select(Asset).where(
+            Asset.tenant_id == tenant_id,
+            Asset.project_id == project_id,
+            Asset.asset_id == external_asset_id,
+        )
+    )
+    if asset is None:
+        raise ApplicationError(code="AIOPS_5004", message="告警资产不存在", status_code=404)
+    return _asset_view(asset)
+
+
+async def update_asset_agent_state(
+    session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    asset_id: UUID,
+    agent_status: str,
+    hostname: str | None = None,
+) -> AssetView:
+    asset = await _asset_model_for_scope(session, tenant_id=tenant_id, asset_id=asset_id)
+    asset.agent_status = agent_status
+    if hostname is not None:
+        asset.hostname = hostname
+    return _asset_view(asset)
+
+
+async def update_asset_monitoring_status(
+    session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    asset_id: UUID,
+    monitoring_status: str,
+) -> AssetView:
+    asset = await _asset_model_for_scope(session, tenant_id=tenant_id, asset_id=asset_id)
+    asset.monitoring_status = monitoring_status
+    return _asset_view(asset)
+
+
+async def _asset_model_for_scope(
+    session: AsyncSession, *, tenant_id: UUID, asset_id: UUID
+) -> Asset:
+    asset = await session.scalar(
+        select(Asset).where(Asset.id == asset_id, Asset.tenant_id == tenant_id)
+    )
+    if asset is None:
         raise ApplicationError(code="AIOPS_3104", message="资产不存在", status_code=404)
     return asset
 
@@ -25,7 +84,7 @@ async def require_asset_refs(
     tenant_id: UUID,
     project_id: UUID,
     asset_ids: list[UUID],
-) -> list[Asset]:
+) -> list[AssetView]:
     if not asset_ids:
         return []
     rows = (
@@ -39,14 +98,32 @@ async def require_asset_refs(
     ).all()
     by_id = {row.id: row for row in rows}
     if set(by_id) != set(asset_ids):
-        from aiops_x_api.core.errors import ApplicationError
-
         raise ApplicationError(
             code="AIOPS_3105",
             message="关联资产不存在或超出项目范围",
             status_code=404,
         )
-    return [by_id[asset_id] for asset_id in asset_ids]
+    return [_asset_view(by_id[asset_id]) for asset_id in asset_ids]
+
+
+def _asset_view(asset: Asset) -> AssetView:
+    return AssetView(
+        id=asset.id,
+        tenant_id=asset.tenant_id,
+        project_id=asset.project_id,
+        asset_id=asset.asset_id,
+        asset_type=asset.asset_type,
+        name=asset.name,
+        hostname=asset.hostname,
+        ip_addresses=list(asset.ip_addresses),
+        environment=asset.environment,
+        criticality=asset.criticality,
+        gxp_classification=asset.gxp_classification,
+        tags=list(asset.tags),
+        lifecycle_status=asset.lifecycle_status,
+        agent_status=asset.agent_status,
+        monitoring_status=asset.monitoring_status,
+    )
 
 
 async def dependency_correlation_key(

@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from aiops_x_api.core.errors import ApplicationError
 from aiops_x_api.modules.change.infrastructure.models import ChangeRequest
 from aiops_x_api.modules.cmdb.application import require_asset_refs
-from aiops_x_api.modules.cmdb.infrastructure.models import Asset
+from aiops_x_api.modules.cmdb.contracts import AssetView
 from aiops_x_api.modules.incident.contracts import require_incident_refs
 
 ALLOWED_STATUS_TRANSITIONS: dict[str, set[str]] = {
@@ -69,7 +69,7 @@ async def validate_change_links(
     project_id: UUID,
     asset_ids: list[UUID],
     incident_ids: list[UUID],
-) -> list[Asset]:
+) -> list[AssetView]:
     assets = await require_asset_refs(
         session,
         tenant_id=tenant_id,
