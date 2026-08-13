@@ -1,6 +1,7 @@
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from uuid import UUID
 
 import pytest
 from aiops_x_api.core.config import get_settings
@@ -8,7 +9,9 @@ from aiops_x_api.core.database import Base, get_session
 from aiops_x_api.main import create_app
 from aiops_x_api.modules.monitoring.contracts import MetricSample
 from aiops_x_api.modules.monitoring.dependencies import get_metrics_backend
+from aiops_x_api.modules.monitoring.infrastructure.models import CollectorState
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 
@@ -115,6 +118,19 @@ async def test_node_metrics_require_unique_verified_fresh_asset_binding() -> Non
         assert body["root_filesystem_usage_percent"] == 56.5
         assert "prometheus_url" not in body
         assert all('aiops_asset_id="MON-LINUX-001"' in query for query in backend.queries)
+
+        current_asset = client.get(f"/api/v1/assets/{asset['id']}", headers=auth).json()
+        assert current_asset["monitoring_status"] == "active"
+        assert current_asset["last_monitored_at"] is not None
+
+        async with factory() as session:
+            collector_state = await session.scalar(
+                select(CollectorState).where(CollectorState.asset_id == UUID(asset["id"]))
+            )
+            assert collector_state is not None
+            assert collector_state.status == "healthy"
+            assert collector_state.consecutive_failures == 0
+            assert collector_state.last_sample_at is not None
 
         targets = client.get("/api/v1/monitoring/targets", headers=auth)
         assert targets.status_code == 200

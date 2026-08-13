@@ -85,3 +85,39 @@ class AssetMonitorBinding(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )
+
+
+class CollectorState(Base):
+    __tablename__ = "collector_states"
+    __table_args__ = (
+        UniqueConstraint("asset_id", "collector_type"),
+        Index("ix_collector_states_scope_status", "tenant_id", "project_id", "status"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    tenant_id: Mapped[UUID] = mapped_column(
+        ForeignKey("tenants.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    project_id: Mapped[UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    asset_id: Mapped[UUID] = mapped_column(
+        ForeignKey("assets.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    monitor_target_id: Mapped[UUID] = mapped_column(
+        ForeignKey("monitor_targets.id", ondelete="CASCADE"), nullable=False, unique=True
+    )
+    collector_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(String(24), default="unknown", nullable=False, index=True)
+    config_revision: Mapped[int] = mapped_column(default=1, nullable=False)
+    consecutive_failures: Mapped[int] = mapped_column(default=0, nullable=False)
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_sample_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error_code: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )

@@ -10,7 +10,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from aiops_x_api.core.database import get_session
 from aiops_x_api.core.errors import ApplicationError
 from aiops_x_api.modules.audit.application import append_audit
-from aiops_x_api.modules.cmdb.application import get_asset_for_scope
+from aiops_x_api.modules.cmdb.application import (
+    get_asset_for_scope,
+    update_asset_monitoring_status,
+)
 from aiops_x_api.modules.identity.security import (
     Principal,
     ensure_asset_scope,
@@ -21,6 +24,7 @@ from aiops_x_api.modules.identity.security import (
 from aiops_x_api.modules.monitoring.application import (
     collect_node_metrics,
     get_binding_for_asset,
+    record_collector_result,
     verify_target,
 )
 from aiops_x_api.modules.monitoring.contracts import MetricSample, MetricsBackend
@@ -212,6 +216,21 @@ async def verify_monitor_target(
         binding.verification_status = "failed"
         binding.last_verified_at = checked_at
         binding.last_error_code = exc.code
+        await record_collector_result(
+            session,
+            target=target,
+            binding=binding,
+            checked_at=checked_at,
+            sample_at=None,
+            healthy=False,
+            error_code=exc.code,
+        )
+        await update_asset_monitoring_status(
+            session,
+            tenant_id=principal.tenant_id,
+            asset_id=binding.asset_id,
+            monitoring_status="error",
+        )
         await append_audit(
             session,
             request,
@@ -228,6 +247,23 @@ async def verify_monitor_target(
     binding.verification_status = "verified"
     binding.last_verified_at = checked_at
     binding.last_error_code = None
+    target_up = verified.up_sample.value == 1.0
+    await record_collector_result(
+        session,
+        target=target,
+        binding=binding,
+        checked_at=checked_at,
+        sample_at=verified.up_sample.observed_at,
+        healthy=target_up,
+        error_code=None if target_up else "AIOPS_TARGET_DOWN",
+    )
+    await update_asset_monitoring_status(
+        session,
+        tenant_id=principal.tenant_id,
+        asset_id=binding.asset_id,
+        monitoring_status="active" if target_up else "degraded",
+        last_monitored_at=verified.up_sample.observed_at,
+    )
     await append_audit(
         session,
         request,
@@ -247,7 +283,7 @@ async def verify_monitor_target(
         verified_at=verified.verified_at,
         error_code=None,
         sample_timestamp=verified.up_sample.observed_at,
-        target_up=verified.up_sample.value == 1.0,
+        target_up=target_up,
     )
 
 
@@ -272,6 +308,23 @@ async def get_node_metrics(
     binding.verification_status = "verified"
     binding.last_verified_at = verified.verified_at
     binding.last_error_code = None
+    target_up = verified.up_sample.value == 1.0
+    await record_collector_result(
+        session,
+        target=target,
+        binding=binding,
+        checked_at=verified.verified_at,
+        sample_at=verified.up_sample.observed_at,
+        healthy=target_up,
+        error_code=None if target_up else "AIOPS_TARGET_DOWN",
+    )
+    await update_asset_monitoring_status(
+        session,
+        tenant_id=principal.tenant_id,
+        asset_id=asset.id,
+        monitoring_status="active" if target_up else "degraded",
+        last_monitored_at=verified.up_sample.observed_at,
+    )
     await session.commit()
     age = max(0.0, (verified.verified_at - verified.up_sample.observed_at).total_seconds())
     return NodeMetricsResponse(
@@ -281,7 +334,7 @@ async def get_node_metrics(
         collected_at=verified.verified_at,
         sample_timestamp=verified.up_sample.observed_at,
         age_seconds=round(age, 3),
-        target_up=verified.up_sample.value == 1.0,
+        target_up=target_up,
         cpu_usage_percent=_first_value(samples["cpu"]),
         memory_usage_percent=_first_value(samples["memory"]),
         root_filesystem_usage_percent=_first_value(samples["filesystem"]),

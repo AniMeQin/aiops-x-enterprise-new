@@ -58,6 +58,16 @@ Phase 2 — Data Pipeline 当前完成了“发现候选纵向切片”，但整
 - 本切片复评分为 61/100；Phase 2 仍缺设备/接口/服务/容器/数据库实体、发现调度和
   候选→唯一监控绑定控制器，正式测试/部署继续冻结。
 
+Phase 2 第二个数据切片已继续补齐：
+
+- 迁移 `0017` 扩展 Asset 的 OS 版本、所属业务、发现来源/状态、最近连接和最近监控时间。
+- 新增 `AssetComponent` 父子库存实体及 API，可表达 interface、service、container、
+  Kubernetes workload 和 database instance，并由 Asset/tenant/project 外键约束归属。
+- 新增 `CollectorState`，记录采集器配置版本、健康状态、连续失败和最后尝试/成功/样本时间；
+  Prometheus 验证和指标读取现在同步该状态与 Asset.monitoring_status。
+- Phase 2 核心数据模型复评分为 63/100，Data Integrity 达 9；整体、Frontend、Monitoring
+  和 Alerting 仍不满足准入，动态 target 控制器与发现调度仍待继续。
+
 Phase 0 仍有以下阻断项：
 
 - Git 仓库的敏感信息/大文件/生成物清查已通过；已从同一内容的本机无元数据快照建立
@@ -83,6 +93,8 @@ Phase 0 仍有以下阻断项：
 - PostgreSQL 15 最小 `0014→0015→0014→0015`：通过，服务日志无 ERROR/FATAL/PANIC。
 - PostgreSQL 15 最小 `0015→0016→0015→0016`：通过，3 张发现表可创建/回退，候选表 8 个
   PK/Unique/FK 约束符合预期；因本机无 pgvector，这不等于完整 `0001→0016` 历史链。
+- PostgreSQL 15 最小 `0015→0017→0016→0017`：通过；资产 6 个新字段、组件/采集状态 2 表
+  可逆，两个新表共 13 个 PK/Unique/FK 约束。仍不等于含 pgvector 的完整历史链。
 - Python `py_compile`：First E2E、monitoring、operations 与 `0015` 迁移通过。
 - npm 隔离安装审计：0 vulnerabilities；Vite 仍提示已有大 chunk 警告，留待前端专项整改。
 
@@ -99,8 +111,8 @@ Phase 0 仍有以下阻断项：
 
 ## 下一步
 
-1. 继续 Phase 2，补齐 Device/Interface/Service/Container/Database Instance、采集状态和
-   候选确认后受控建立唯一监控绑定；再进行完整 Phase 2 复审。
+1. 继续 Phase 2/3 交界工作：实现发现调度、动态 Prometheus target 发布，并扩展 Linux
+   全量指标和历史查询；完成真实资产唯一绑定后再做 Phase 2 最终复审。
 2. 只有未来准入允许部署后，才在测试环境复验 Edge Agent Prometheus target、真实规则触发
    与恢复；文件修复不等于运行态生效。
 3. 正式数据库阶段补做完整旧库克隆升级、`alembic check`、备份恢复和回退兼容性验证。

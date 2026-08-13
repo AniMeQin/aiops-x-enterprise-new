@@ -135,7 +135,44 @@ async def test_discovery_candidate_requires_confirmation_before_cmdb(
     assert asset.status_code == 200, asset.text
     assert asset.json()["ip_addresses"] == ["10.20.30.40"]
     assert asset.json()["monitoring_status"] == "not_configured"
+    assert asset.json()["discovery_source"] == "controlled_tcp"
+    assert asset.json()["discovery_status"] == "confirmed"
     assert "credential_ref" not in asset.text
+
+    database = client.post(
+        f"/api/v1/assets/{confirmation.json()['asset_id']}/components",
+        headers=auth,
+        json={
+            "component_type": "database_instance",
+            "external_id": "postgres:5432/app",
+            "name": "Application PostgreSQL",
+            "status": "observed",
+            "source": "controlled-discovery-test",
+            "attributes": {"engine": "postgresql", "port": 5432},
+            "observed_at": candidate["last_seen_at"],
+        },
+    )
+    assert database.status_code == 201, database.text
+    container = client.post(
+        f"/api/v1/assets/{confirmation.json()['asset_id']}/components",
+        headers=auth,
+        json={
+            "parent_component_id": database.json()["id"],
+            "component_type": "container",
+            "external_id": "sha256:acceptance",
+            "name": "postgres-container",
+            "status": "running",
+            "source": "controlled-discovery-test",
+            "attributes": {"runtime": "docker"},
+            "observed_at": candidate["last_seen_at"],
+        },
+    )
+    assert container.status_code == 201, container.text
+    components = client.get(
+        f"/api/v1/assets/{confirmation.json()['asset_id']}/components", headers=auth
+    )
+    assert components.status_code == 200
+    assert components.json()["total"] == 2
 
     backend.observations = []
     second_run = client.post(f"/api/v1/discovery/jobs/{job.json()['id']}/run", headers=auth)

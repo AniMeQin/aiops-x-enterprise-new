@@ -4,13 +4,17 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, Query, Request, Response
 from sqlalchemy import func, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aiops_x_api.core.database import get_session
 from aiops_x_api.core.errors import ApplicationError
 from aiops_x_api.modules.audit.application import append_audit
-from aiops_x_api.modules.cmdb.infrastructure.models import Asset, AssetRelation
+from aiops_x_api.modules.cmdb.infrastructure.models import Asset, AssetComponent, AssetRelation
 from aiops_x_api.modules.cmdb.schemas import (
+    AssetComponentCreate,
+    AssetComponentPage,
+    AssetComponentResponse,
     AssetCreate,
     AssetPage,
     AssetRelationCreate,
@@ -253,6 +257,112 @@ async def retire_asset(
             resource_id=str(asset.id),
         )
     return Response(status_code=204)
+
+
+@router.get("/{asset_id}/components", response_model=AssetComponentPage)
+async def list_asset_components(
+    asset_id: UUID,
+    principal: Annotated[Principal, Depends(require_permission("asset:read"))],
+    session: Annotated[AsyncSession, Depends(get_session)],
+    page: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=100)] = 20,
+    component_type: Annotated[str | None, Query(max_length=32)] = None,
+) -> AssetComponentPage:
+    asset = await _get_asset(session, principal.tenant_id, asset_id)
+    ensure_asset_scope(
+        principal,
+        project_id=asset.project_id,
+        environment=asset.environment,
+        tags=asset.tags,
+        gxp_classification=asset.gxp_classification,
+    )
+    filters = [
+        AssetComponent.tenant_id == principal.tenant_id,
+        AssetComponent.asset_id == asset.id,
+    ]
+    if component_type is not None:
+        filters.append(AssetComponent.component_type == component_type)
+    total = await session.scalar(select(func.count()).select_from(AssetComponent).where(*filters))
+    rows = (
+        await session.scalars(
+            select(AssetComponent)
+            .where(*filters)
+            .order_by(AssetComponent.component_type, AssetComponent.name)
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        )
+    ).all()
+    return AssetComponentPage(
+        items=[AssetComponentResponse.model_validate(row) for row in rows],
+        page=page,
+        page_size=page_size,
+        total=total or 0,
+    )
+
+
+@router.post("/{asset_id}/components", response_model=AssetComponentResponse, status_code=201)
+async def create_asset_component(
+    asset_id: UUID,
+    payload: AssetComponentCreate,
+    request: Request,
+    principal: Annotated[Principal, Depends(require_permission("asset:write"))],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> AssetComponentResponse:
+    async with session.begin():
+        asset = await _get_asset(session, principal.tenant_id, asset_id)
+        ensure_asset_scope(
+            principal,
+            project_id=asset.project_id,
+            environment=asset.environment,
+            tags=asset.tags,
+            gxp_classification=asset.gxp_classification,
+        )
+        if payload.parent_component_id is not None:
+            parent = await session.scalar(
+                select(AssetComponent).where(
+                    AssetComponent.id == payload.parent_component_id,
+                    AssetComponent.tenant_id == principal.tenant_id,
+                    AssetComponent.asset_id == asset.id,
+                )
+            )
+            if parent is None:
+                raise ApplicationError(
+                    code="AIOPS_3115",
+                    message="父组件不存在或不属于当前资产",
+                    status_code=422,
+                )
+        component = AssetComponent(
+            tenant_id=principal.tenant_id,
+            project_id=asset.project_id,
+            asset_id=asset.id,
+            **payload.model_dump(),
+        )
+        try:
+            async with session.begin_nested():
+                session.add(component)
+                await session.flush()
+        except IntegrityError as error:
+            raise ApplicationError(
+                code="AIOPS_3116",
+                message="资产组件标识已存在",
+                status_code=409,
+            ) from error
+        await append_audit(
+            session,
+            request,
+            action="asset.component.created",
+            resource_type="asset_component",
+            outcome="success",
+            principal=principal,
+            project_id=asset.project_id,
+            resource_id=str(component.id),
+            metadata={
+                "asset_id": str(asset.id),
+                "component_type": component.component_type,
+                "source": component.source,
+            },
+        )
+    return AssetComponentResponse.model_validate(component)
 
 
 @router.get("/{asset_id}/relations", response_model=AssetRelationPage)

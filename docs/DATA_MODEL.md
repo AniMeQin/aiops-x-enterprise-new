@@ -1,6 +1,6 @@
 # 数据模型
 
-当前工作区模型对应 Alembic `0016_discovery_control_plane`；该迁移尚未部署到测试环境。测试
+当前工作区模型对应 Alembic `0017_asset_components_collector_state`；该迁移尚未部署到测试环境。测试
 环境仍停在 `0014_security_center`，详见 `docs/STATUS.md`。
 
 ```mermaid
@@ -17,6 +17,8 @@ erDiagram
   DiscoveryJob ||--o{ DiscoveryRun : executes
   DiscoveryJob ||--o{ DiscoveryCandidate : observes
   DiscoveryCandidate }o--o| Asset : confirms_as
+  Asset ||--o{ AssetComponent : contains
+  Asset ||--o| CollectorState : reports
   Asset ||--o{ Alert : emits
   Alert }o--o{ OperationsEvent : correlates
   OperationsEvent ||--o{ Incident : escalates
@@ -36,9 +38,13 @@ erDiagram
   `UserDepartment`、`IdentityGroup`、`GroupMembership`、`ProjectMembership`、
   `ApiToken`、`OidcAuthorizationState`、`OidcIdentity`。
 - CMDB：`Asset`、`AssetRelation`。
+- CMDB 组件：`AssetComponent` 以父子关系表达 interface、service、container、
+  kubernetes_workload、database_instance，不把真实库存混入无约束 JSON 列表。
 - Monitoring：`MonitorTarget`、`AssetMonitorBinding`。绑定保存 Prometheus job/instance、
   tenant/project 标签快照和资产身份标签；数据库及 API 共同阻止同一项目中的重复目标和
   同一资产用途的重复绑定。
+- Collector State：`CollectorState` 持久化采集类型、配置版本、当前状态、连续失败、最后尝试、
+  最后成功、最后样本时间和脱敏错误码；每个 Asset/collector type 以及 MonitorTarget 均唯一。
 - Discovery：`DiscoveryJob`、`DiscoveryRun`、`DiscoveryCandidate`。任务只接受有界 RFC1918
   IPv4 网段；运行记录真实状态和计数；候选保存版本化观测证据、稳定指纹、人工审查状态及
   可选 Asset 外键。

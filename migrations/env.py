@@ -20,7 +20,11 @@ from aiops_x_api.modules.change.infrastructure.models import (  # noqa: F401
     ChangeRequest,
     ChangeTimelineEntry,
 )
-from aiops_x_api.modules.cmdb.infrastructure.models import Asset, AssetRelation  # noqa: F401
+from aiops_x_api.modules.cmdb.infrastructure.models import (  # noqa: F401
+    Asset,
+    AssetComponent,
+    AssetRelation,
+)
 from aiops_x_api.modules.discovery.infrastructure.models import (  # noqa: F401
     DiscoveryCandidate,
     DiscoveryJob,
@@ -53,6 +57,7 @@ from aiops_x_api.modules.knowledge.infrastructure.models import (  # noqa: F401
 )
 from aiops_x_api.modules.monitoring.infrastructure.models import (  # noqa: F401
     AssetMonitorBinding,
+    CollectorState,
     MonitorTarget,
 )
 from aiops_x_api.modules.operations.infrastructure.models import (  # noqa: F401

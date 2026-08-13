@@ -50,6 +50,8 @@ class AssetCreate(BaseModel):
     hostname: str | None = Field(default=None, max_length=255)
     ip_addresses: list[str] = Field(default_factory=list, max_length=32)
     operating_system: str | None = Field(default=None, max_length=120)
+    operating_system_version: str | None = Field(default=None, max_length=120)
+    business_service: str | None = Field(default=None, max_length=160)
     environment: str = Field(default="unknown", min_length=2, max_length=32)
     owner: str | None = Field(default=None, max_length=120)
     department: str | None = Field(default=None, max_length=120)
@@ -85,6 +87,8 @@ class AssetUpdate(BaseModel):
     hostname: str | None = Field(default=None, max_length=255)
     ip_addresses: list[str] | None = Field(default=None, max_length=32)
     operating_system: str | None = Field(default=None, max_length=120)
+    operating_system_version: str | None = Field(default=None, max_length=120)
+    business_service: str | None = Field(default=None, max_length=160)
     environment: str | None = Field(default=None, min_length=2, max_length=32)
     owner: str | None = Field(default=None, max_length=120)
     department: str | None = Field(default=None, max_length=120)
@@ -126,6 +130,8 @@ class AssetResponse(BaseModel):
     hostname: str | None
     ip_addresses: list[str]
     operating_system: str | None
+    operating_system_version: str | None
+    business_service: str | None
     environment: str
     owner: str | None
     department: str | None
@@ -138,6 +144,10 @@ class AssetResponse(BaseModel):
     credential_configured: bool
     tags: list[str]
     custom_attributes: dict[str, Any]
+    discovery_source: str | None
+    discovery_status: str
+    last_connected_at: datetime | None
+    last_monitored_at: datetime | None
     created_at: datetime
     updated_at: datetime
 
@@ -186,6 +196,54 @@ class AssetRelationResponse(BaseModel):
 
 class AssetRelationPage(BaseModel):
     items: list[AssetRelationResponse]
+    page: int
+    page_size: int
+    total: int
+
+
+ComponentType = Literal[
+    "interface",
+    "service",
+    "container",
+    "kubernetes_workload",
+    "database_instance",
+]
+
+
+class AssetComponentCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    parent_component_id: UUID | None = None
+    component_type: ComponentType
+    external_id: str = Field(min_length=1, max_length=255)
+    name: str = Field(min_length=1, max_length=255)
+    status: str = Field(default="unknown", min_length=2, max_length=32)
+    source: str = Field(min_length=2, max_length=120)
+    attributes: dict[str, Any] = Field(default_factory=dict)
+    observed_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+class AssetComponentResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    tenant_id: UUID
+    project_id: UUID
+    asset_id: UUID
+    parent_component_id: UUID | None
+    component_type: str
+    external_id: str
+    name: str
+    status: str
+    source: str
+    attributes: dict[str, Any]
+    observed_at: datetime
+    created_at: datetime
+    updated_at: datetime
+
+
+class AssetComponentPage(BaseModel):
+    items: list[AssetComponentResponse]
     page: int
     page_size: int
     total: int

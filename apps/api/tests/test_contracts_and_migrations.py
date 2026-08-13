@@ -11,9 +11,9 @@ ROOT = Path(__file__).resolve().parents[3]
 
 def test_alembic_has_one_linear_enterprise_head() -> None:
     script = ScriptDirectory.from_config(Config(str(ROOT / "alembic.ini")))
-    assert script.get_heads() == ["0016_discovery_control_plane"]
+    assert script.get_heads() == ["0017_asset_components_collector_state"]
     revisions = list(script.walk_revisions(base="base", head="heads"))
-    assert len(revisions) == 16
+    assert len(revisions) == 17
     assert all(len(revision._normalized_down_revisions) <= 1 for revision in revisions)
 
 

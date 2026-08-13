@@ -10,7 +10,11 @@ from aiops_x_api.core.errors import ApplicationError
 from aiops_x_api.modules.cmdb.application import get_asset_for_scope
 from aiops_x_api.modules.cmdb.contracts import AssetView
 from aiops_x_api.modules.monitoring.contracts import MetricSample, MetricsBackend
-from aiops_x_api.modules.monitoring.infrastructure.models import AssetMonitorBinding, MonitorTarget
+from aiops_x_api.modules.monitoring.infrastructure.models import (
+    AssetMonitorBinding,
+    CollectorState,
+    MonitorTarget,
+)
 
 
 @dataclass(frozen=True)
@@ -19,6 +23,49 @@ class VerifiedTarget:
     binding: AssetMonitorBinding
     up_sample: MetricSample
     verified_at: datetime
+
+
+async def record_collector_result(
+    session: AsyncSession,
+    *,
+    target: MonitorTarget,
+    binding: AssetMonitorBinding,
+    checked_at: datetime,
+    sample_at: datetime | None,
+    healthy: bool,
+    error_code: str | None,
+) -> CollectorState:
+    state = await session.scalar(
+        select(CollectorState).where(
+            CollectorState.asset_id == binding.asset_id,
+            CollectorState.collector_type == target.target_type,
+        )
+    )
+    if state is None:
+        state = CollectorState(
+            tenant_id=binding.tenant_id,
+            project_id=binding.project_id,
+            asset_id=binding.asset_id,
+            monitor_target_id=target.id,
+            collector_type=target.target_type,
+            status="unknown",
+            config_revision=1,
+            consecutive_failures=0,
+        )
+        session.add(state)
+    state.monitor_target_id = target.id
+    state.last_attempt_at = checked_at
+    state.last_sample_at = sample_at
+    state.last_error_code = error_code
+    if healthy:
+        state.status = "healthy"
+        state.last_success_at = checked_at
+        state.consecutive_failures = 0
+    else:
+        state.status = "failed"
+        state.consecutive_failures += 1
+    await session.flush()
+    return state
 
 
 def target_selector(target: MonitorTarget, binding: AssetMonitorBinding) -> str:

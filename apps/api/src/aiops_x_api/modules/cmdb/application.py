@@ -50,6 +50,8 @@ async def update_asset_agent_state(
 ) -> AssetView:
     asset = await _asset_model_for_scope(session, tenant_id=tenant_id, asset_id=asset_id)
     asset.agent_status = agent_status
+    if agent_status == "online":
+        asset.last_connected_at = datetime.now(UTC)
     if hostname is not None:
         asset.hostname = hostname
     return _asset_view(asset)
@@ -61,9 +63,12 @@ async def update_asset_monitoring_status(
     tenant_id: UUID,
     asset_id: UUID,
     monitoring_status: str,
+    last_monitored_at: datetime | None = None,
 ) -> AssetView:
     asset = await _asset_model_for_scope(session, tenant_id=tenant_id, asset_id=asset_id)
     asset.monitoring_status = monitoring_status
+    if last_monitored_at is not None:
+        asset.last_monitored_at = last_monitored_at
     return _asset_view(asset)
 
 
@@ -160,6 +165,8 @@ async def create_discovered_asset(
         gxp_classification=gxp_classification,
         tags=tags,
         custom_attributes={"discovery": discovery_metadata},
+        discovery_source="controlled_tcp",
+        discovery_status="confirmed",
         lifecycle_status="active",
         agent_status="not_installed",
         monitoring_status="not_configured",
