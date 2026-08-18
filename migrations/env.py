@@ -56,12 +56,15 @@ from aiops_x_api.modules.knowledge.infrastructure.models import (  # noqa: F401
     KnowledgeDocument,
 )
 from aiops_x_api.modules.monitoring.infrastructure.models import (  # noqa: F401
+    AlertRule,
+    AlertRuleVersion,
     AssetMonitorBinding,
     CollectorState,
     MonitorTarget,
 )
 from aiops_x_api.modules.operations.infrastructure.models import (  # noqa: F401
     Alert,
+    AlertTimelineEntry,
     EventAlert,
     EventTimelineEntry,
     MaintenanceWindow,

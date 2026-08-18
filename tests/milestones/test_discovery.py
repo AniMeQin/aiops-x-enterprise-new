@@ -78,6 +78,22 @@ async def test_discovery_candidate_requires_confirmation_before_cmdb(
     assert public_network.status_code == 422
     assert public_network.json()["code"] == "AIOPS_3301"
 
+    scheduled = client.post(
+        "/api/v1/discovery/jobs",
+        headers=auth,
+        json={
+            "project_id": project_id,
+            "name": "scheduled-private-subnet",
+            "networks": ["10.20.30.41/32"],
+            "ports": [22],
+            "schedule_enabled": True,
+            "schedule_interval_seconds": 300,
+        },
+    )
+    assert scheduled.status_code == 201, scheduled.text
+    assert scheduled.json()["schedule_enabled"] is True
+    assert scheduled.json()["next_run_at"] is not None
+
     job = client.post(
         "/api/v1/discovery/jobs",
         headers=auth,

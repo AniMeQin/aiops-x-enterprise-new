@@ -26,6 +26,7 @@ async def append_audit(
     project_id: UUID | None = None,
     resource_id: str | None = None,
     metadata: dict[str, Any] | None = None,
+    producer: str = "aiops-x-api",
 ) -> AuditLog:
     effective_tenant_id = principal.tenant_id if principal is not None else tenant_id
     partition_key = str(effective_tenant_id) if effective_tenant_id is not None else "platform"
@@ -119,7 +120,7 @@ async def append_audit(
                     "occurred_at": occurred_at.isoformat().replace("+00:00", "Z"),
                     "tenant_id": str(effective_tenant_id),
                     "project_id": str(project_id) if project_id is not None else None,
-                    "producer": "aiops-x-api",
+                    "producer": producer,
                     "trace_id": entry.trace_id,
                     "correlation_id": resource_id,
                     "data": {

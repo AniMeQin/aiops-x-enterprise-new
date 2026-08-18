@@ -1,7 +1,18 @@
 from datetime import datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import DateTime, ForeignKey, Index, String, UniqueConstraint, func
+from sqlalchemy import (
+    JSON,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from aiops_x_api.core.database import Base
@@ -120,4 +131,58 @@ class CollectorState(Base):
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
+class AlertRule(Base):
+    __tablename__ = "alert_rules"
+    __table_args__ = (UniqueConstraint("tenant_id", "project_id", "slug"),)
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    tenant_id: Mapped[UUID] = mapped_column(
+        ForeignKey("tenants.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    project_id: Mapped[UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    slug: Mapped[str] = mapped_column(String(120), nullable=False)
+    name: Mapped[str] = mapped_column(String(160), nullable=False)
+    enabled: Mapped[bool] = mapped_column(default=True, nullable=False)
+    current_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    published_version: Mapped[int | None] = mapped_column(Integer)
+    created_by: Mapped[UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
+class AlertRuleVersion(Base):
+    __tablename__ = "alert_rule_versions"
+    __table_args__ = (UniqueConstraint("alert_rule_id", "version"),)
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    alert_rule_id: Mapped[UUID] = mapped_column(
+        ForeignKey("alert_rules.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    metric_key: Mapped[str] = mapped_column(String(32), nullable=False)
+    operator: Mapped[str] = mapped_column(String(4), nullable=False)
+    threshold: Mapped[float] = mapped_column(Float, nullable=False)
+    duration_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    severity: Mapped[str] = mapped_column(String(16), nullable=False)
+    expression: Mapped[str] = mapped_column(Text, nullable=False)
+    labels: Mapped[dict[str, str]] = mapped_column(JSON, default=dict, nullable=False)
+    annotations: Mapped[dict[str, str]] = mapped_column(JSON, default=dict, nullable=False)
+    status: Mapped[str] = mapped_column(String(24), default="draft", nullable=False, index=True)
+    created_by: Mapped[UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
+    )
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
     )

@@ -5,6 +5,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import (
     JSON,
     Boolean,
+    CheckConstraint,
     DateTime,
     Float,
     ForeignKey,
@@ -20,7 +21,13 @@ from aiops_x_api.core.database import Base
 
 class DiscoveryJob(Base):
     __tablename__ = "discovery_jobs"
-    __table_args__ = (UniqueConstraint("tenant_id", "project_id", "name"),)
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "project_id", "name"),
+        CheckConstraint(
+            "schedule_interval_seconds >= 300 AND schedule_interval_seconds <= 86400",
+            name="schedule_interval",
+        ),
+    )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     tenant_id: Mapped[UUID] = mapped_column(
@@ -36,6 +43,9 @@ class DiscoveryJob(Base):
     timeout_seconds: Mapped[float] = mapped_column(Float, default=0.5, nullable=False)
     max_hosts: Mapped[int] = mapped_column(Integer, default=256, nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    schedule_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    schedule_interval_seconds: Mapped[int] = mapped_column(Integer, default=300, nullable=False)
+    next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     run_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     last_run_status: Mapped[str] = mapped_column(String(24), default="never", nullable=False)
     last_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

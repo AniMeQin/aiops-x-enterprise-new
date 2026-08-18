@@ -22,6 +22,7 @@ from aiops_x_api.modules.cmdb.application import (
     update_asset_monitoring_status,
 )
 from aiops_x_api.modules.cmdb.contracts import AssetView
+from aiops_x_api.modules.identity.application import require_active_user_refs
 from aiops_x_api.modules.identity.security import (
     Principal,
     ensure_asset_scope,
@@ -40,16 +41,20 @@ from aiops_x_api.modules.monitoring.contracts import MetricsBackend
 from aiops_x_api.modules.monitoring.dependencies import get_metrics_backend
 from aiops_x_api.modules.operations.infrastructure.models import (
     Alert,
+    AlertTimelineEntry,
     EventAlert,
     EventTimelineEntry,
     MaintenanceWindow,
     OperationsEvent,
 )
 from aiops_x_api.modules.operations.schemas import (
+    AlertActionRequest,
+    AlertDetail,
     AlertmanagerAlert,
     AlertmanagerWebhook,
     AlertPage,
     AlertResponse,
+    AlertTimelineResponse,
     EventAsset,
     EventAutomationJob,
     EventDetail,
@@ -258,6 +263,116 @@ async def list_alerts(
     )
 
 
+@router.get("/alerts/{alert_id}", response_model=AlertDetail)
+async def get_alert_detail(
+    alert_id: UUID,
+    principal: Annotated[Principal, Depends(require_permission("alert:read"))],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> AlertDetail:
+    alert = await _alert_in_scope(session, principal, alert_id, lock=False)
+    timeline = (
+        await session.scalars(
+            select(AlertTimelineEntry)
+            .where(AlertTimelineEntry.alert_id == alert.id)
+            .order_by(AlertTimelineEntry.occurred_at, AlertTimelineEntry.id)
+        )
+    ).all()
+    return AlertDetail(
+        **AlertResponse.model_validate(alert).model_dump(),
+        timeline=[AlertTimelineResponse.model_validate(item) for item in timeline],
+    )
+
+
+@router.post("/alerts/{alert_id}/actions", response_model=AlertDetail)
+async def apply_alert_action(
+    alert_id: UUID,
+    payload: AlertActionRequest,
+    request: Request,
+    principal: Annotated[Principal, Depends(require_permission("alert:write"))],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> AlertDetail:
+    async with session.begin():
+        alert = await _alert_in_scope(session, principal, alert_id, lock=True)
+        before = alert.status
+        now = datetime.now(UTC)
+        if payload.action == "assign":
+            assert payload.assignee_id is not None
+            if alert.status == "closed":
+                raise ApplicationError(
+                    code="AIOPS_5010", message="已关闭告警不能重新分派", status_code=409
+                )
+            await require_active_user_refs(
+                session,
+                tenant_id=principal.tenant_id,
+                user_ids=[payload.assignee_id],
+            )
+            alert.assigned_to = payload.assignee_id
+        elif payload.action == "acknowledge":
+            if alert.status != "firing":
+                raise ApplicationError(
+                    code="AIOPS_5011", message="只有触发中的告警可以认领", status_code=409
+                )
+            alert.status = "acknowledged"
+            alert.acknowledged_by = principal.user_id
+            alert.acknowledged_at = now
+            if alert.assigned_to is None:
+                alert.assigned_to = principal.user_id
+        elif payload.action == "close":
+            if alert.status != "resolved":
+                raise ApplicationError(
+                    code="AIOPS_5012", message="告警必须先由真实监控恢复才能关闭", status_code=409
+                )
+            alert.status = "closed"
+            alert.closed_by = principal.user_id
+            alert.closed_at = now
+            alert.resolution_summary = payload.resolution_summary
+        elif payload.action == "reopen":
+            if alert.status != "closed":
+                raise ApplicationError(
+                    code="AIOPS_5013", message="只有已关闭告警可以重开", status_code=409
+                )
+            alert.status = "acknowledged"
+            alert.closed_by = None
+            alert.closed_at = None
+            alert.resolution_summary = None
+            alert.reopened_count += 1
+        elif payload.action == "comment":
+            pass
+        timeline_entry = AlertTimelineEntry(
+            tenant_id=alert.tenant_id,
+            project_id=alert.project_id,
+            alert_id=alert.id,
+            actor_id=principal.user_id,
+            action=payload.action,
+            from_status=before,
+            to_status=alert.status,
+            comment=payload.comment or payload.resolution_summary or "",
+            metadata_json={
+                "assignee_id": str(payload.assignee_id) if payload.assignee_id else None,
+            },
+            occurred_at=now,
+        )
+        session.add(timeline_entry)
+        await append_audit(
+            session,
+            request,
+            action=f"alert.{payload.action}",
+            resource_type="alert",
+            outcome="success",
+            principal=principal,
+            project_id=alert.project_id,
+            resource_id=str(alert.id),
+            metadata={
+                "from_status": before,
+                "to_status": alert.status,
+                "assignee_id": str(payload.assignee_id) if payload.assignee_id else None,
+                "comment_present": bool(payload.comment or payload.resolution_summary),
+            },
+        )
+        await session.flush()
+    return await get_alert_detail(alert_id, principal, session)
+
+
 @router.get("/events", response_model=EventPage)
 async def list_events(
     principal: Annotated[Principal, Depends(require_permission("event:read"))],
@@ -351,6 +466,29 @@ async def get_event_detail(
     )
 
 
+async def _alert_in_scope(
+    session: AsyncSession, principal: Principal, alert_id: UUID, *, lock: bool
+) -> Alert:
+    statement = select(Alert).where(Alert.id == alert_id, Alert.tenant_id == principal.tenant_id)
+    if lock:
+        statement = statement.with_for_update()
+    alert = await session.scalar(statement)
+    if alert is None:
+        raise ApplicationError(code="AIOPS_5004", message="告警不存在", status_code=404)
+    ensure_project_scope(principal, alert.project_id)
+    asset = await get_asset_for_scope(
+        session, tenant_id=principal.tenant_id, asset_id=alert.asset_id
+    )
+    ensure_asset_scope(
+        principal,
+        project_id=asset.project_id,
+        environment=asset.environment,
+        tags=asset.tags,
+        gxp_classification=asset.gxp_classification,
+    )
+    return alert
+
+
 async def _ingest_alert(
     session: AsyncSession,
     backend: MetricsBackend,
@@ -381,6 +519,7 @@ async def _ingest_alert(
         .with_for_update()
     )
     event = None
+    previous_status = existing.status if existing is not None else "normal"
     if existing is None:
         alert = Alert(
             alert_id=_human_id("ALT"),
@@ -425,7 +564,8 @@ async def _ingest_alert(
         alert.evidence_refs = evidence_refs
         alert.duplicate_count += 1
         if incoming.status == "resolved":
-            alert.status = "resolved"
+            if alert.status != "closed":
+                alert.status = "resolved"
             alert.ends_at = _resolved_end(incoming, now)
             await update_asset_monitoring_status(
                 session,
@@ -435,7 +575,13 @@ async def _ingest_alert(
             )
             outcome = "resolved"
         else:
-            alert.status = "firing"
+            if alert.status == "closed":
+                alert.reopened_count += 1
+                alert.closed_by = None
+                alert.closed_at = None
+                alert.resolution_summary = None
+            if alert.status != "acknowledged":
+                alert.status = "firing"
             alert.ends_at = None
             await update_asset_monitoring_status(
                 session,
@@ -451,6 +597,20 @@ async def _ingest_alert(
         outcome = "suppressed"
     else:
         event = await _correlate_event(session, request, alert, asset, now, outcome)
+    session.add(
+        AlertTimelineEntry(
+            tenant_id=alert.tenant_id,
+            project_id=alert.project_id,
+            alert_id=alert.id,
+            actor_id=None,
+            action=outcome,
+            from_status=previous_status,
+            to_status=alert.status,
+            comment="",
+            metadata_json={"source": "alertmanager"},
+            occurred_at=now,
+        )
+    )
     await append_audit(
         session,
         request,
@@ -544,7 +704,10 @@ async def _correlate_event(
             select(func.count())
             .select_from(Alert)
             .join(EventAlert, EventAlert.alert_id == Alert.id)
-            .where(EventAlert.event_id == event.id, Alert.status == "firing")
+            .where(
+                EventAlert.event_id == event.id,
+                Alert.status.in_(["firing", "acknowledged"]),
+            )
         )
         if (firing_count or 0) == 0:
             event.status = "resolved"

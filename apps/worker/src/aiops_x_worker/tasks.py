@@ -1,13 +1,38 @@
 import asyncio
 import hashlib
 import json
+import os
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from io import BytesIO
+from pathlib import Path
+from tempfile import NamedTemporaryFile
+from urllib.parse import urlsplit
+from urllib.request import Request as UrlRequest
+from urllib.request import urlopen
+from uuid import UUID
 
 import nats
 from aiops_x_api.core.database import get_engine, get_session_factory
-from aiops_x_api.modules.audit.application import canonical_audit_document
+from aiops_x_api.core.errors import ApplicationError
+from aiops_x_api.modules.audit.application import append_audit, canonical_audit_document
 from aiops_x_api.modules.audit.infrastructure.models import AuditLog, EventOutbox
+from aiops_x_api.modules.cmdb.infrastructure.models import Asset  # noqa: F401
+from aiops_x_api.modules.discovery.adapters import AsyncTcpDiscoveryBackend
+from aiops_x_api.modules.discovery.application import (
+    claim_scheduled_run,
+    collect_observations,
+    complete_run,
+    fail_run,
+    get_job,
+    get_run,
+)
+from aiops_x_api.modules.monitoring.infrastructure.models import (
+    AlertRule,
+    AlertRuleVersion,
+    AssetMonitorBinding,
+    MonitorTarget,
+)
 from aiops_x_api.modules.tenant.infrastructure.models import Project, Tenant  # noqa: F401
 from minio import Minio
 from minio.commonconfig import GOVERNANCE
@@ -16,6 +41,8 @@ from minio.retention import Retention
 from nats.js.api import StreamConfig
 from prometheus_client import Counter, Gauge
 from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.requests import Request
 
 from aiops_x_worker.celery_app import celery_app
 
@@ -43,6 +70,352 @@ JETSTREAM_CONSUMER_LAG = Gauge(
     "Pending and unacknowledged messages for the observability durable consumer.",
     ("stream", "consumer"),
 )
+PROMETHEUS_TARGETS_CONFIGURED = Gauge(
+    "aiops_x_prometheus_targets_configured",
+    "Enabled and uniquely bound Prometheus targets published to file_sd.",
+)
+PROMETHEUS_TARGET_SYNC_FAILED = Counter(
+    "aiops_x_prometheus_target_sync_failures_total",
+    "Prometheus file_sd publication failures.",
+)
+PROMETHEUS_RULES_CONFIGURED = Gauge(
+    "aiops_x_prometheus_rules_configured", "Published managed Prometheus alert rules."
+)
+PROMETHEUS_RULE_SYNC_FAILED = Counter(
+    "aiops_x_prometheus_rule_sync_failures_total", "Prometheus rule sync or reload failures."
+)
+DISCOVERY_SCHEDULED_RUNS = Counter(
+    "aiops_x_discovery_scheduled_runs_total",
+    "Scheduled discovery runs by terminal outcome.",
+    ("outcome",),
+)
+
+
+@dataclass(frozen=True)
+class ScheduledDiscoveryScope:
+    tenant_id: UUID
+    project_id: UUID
+    job_id: UUID
+    run_id: UUID
+    networks: tuple[str, ...]
+    ports: tuple[int, ...]
+    timeout_seconds: float
+    max_hosts: int
+
+
+@dataclass(frozen=True)
+class PublishedRuleDocument:
+    rule_id: UUID
+    slug: str
+    version: int
+    expression: str
+    duration_seconds: int
+    labels: dict[str, str]
+    annotations: dict[str, str]
+
+
+@celery_app.task(name="aiops_x_worker.sync_prometheus_rules")  # type: ignore[untyped-decorator]
+def sync_prometheus_rules() -> dict[str, int]:
+    get_session_factory.cache_clear()
+    get_engine.cache_clear()
+    return asyncio.run(_sync_prometheus_rules_with_database_cleanup())
+
+
+async def _sync_prometheus_rules_with_database_cleanup() -> dict[str, int]:
+    try:
+        return await _sync_prometheus_rules()
+    finally:
+        if get_engine.cache_info().currsize:
+            await get_engine().dispose()
+        get_session_factory.cache_clear()
+        get_engine.cache_clear()
+
+
+async def _sync_prometheus_rules() -> dict[str, int]:
+    from aiops_x_api.core.config import get_settings
+
+    async with get_session_factory()() as session:
+        rows = (
+            await session.execute(
+                select(AlertRule, AlertRuleVersion)
+                .join(
+                    AlertRuleVersion,
+                    (AlertRuleVersion.alert_rule_id == AlertRule.id)
+                    & (AlertRuleVersion.version == AlertRule.published_version),
+                )
+                .where(
+                    AlertRule.enabled.is_(True),
+                    AlertRuleVersion.status == "published",
+                )
+                .order_by(AlertRule.tenant_id, AlertRule.project_id, AlertRule.slug)
+                .limit(10_000)
+            )
+        ).all()
+    rules = [
+        PublishedRuleDocument(
+            rule_id=rule.id,
+            slug=rule.slug,
+            version=version.version,
+            expression=version.expression,
+            duration_seconds=version.duration_seconds,
+            labels=dict(version.labels),
+            annotations=dict(version.annotations),
+        )
+        for rule, version in rows
+    ]
+    settings = get_settings()
+    try:
+        await asyncio.to_thread(
+            _atomic_write_json,
+            Path(settings.prometheus_rule_file_path),
+            render_prometheus_rules(rules),
+        )
+        await asyncio.to_thread(_reload_prometheus, settings.prometheus_reload_url)
+    except OSError:
+        PROMETHEUS_RULE_SYNC_FAILED.inc()
+        raise
+    PROMETHEUS_RULES_CONFIGURED.set(len(rules))
+    return {"published": len(rules)}
+
+
+def render_prometheus_rules(rules: list[PublishedRuleDocument]) -> dict[str, object]:
+    return {
+        "groups": [
+            {
+                "name": "aiops-x-managed",
+                "rules": [
+                    {
+                        "alert": "AIOpsX_" + rule.slug.replace("-", "_") + f"_v{rule.version}",
+                        "expr": rule.expression,
+                        "for": f"{rule.duration_seconds}s",
+                        "labels": rule.labels,
+                        "annotations": rule.annotations,
+                    }
+                    for rule in rules
+                ],
+            }
+        ]
+    }
+
+
+def _reload_prometheus(url: str) -> None:
+    parsed = urlsplit(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise OSError("Prometheus reload URL is invalid")
+    request = UrlRequest(url, data=b"", method="POST")  # noqa: S310 -- validated above
+    with urlopen(request, timeout=5) as response:  # noqa: S310 -- internal configured service
+        if response.status != 200:
+            raise OSError("Prometheus reload was rejected")
+
+
+@celery_app.task(name="aiops_x_worker.run_scheduled_discovery")  # type: ignore[untyped-decorator]
+def run_scheduled_discovery() -> dict[str, int]:
+    get_session_factory.cache_clear()
+    get_engine.cache_clear()
+    return asyncio.run(_scheduled_discovery_with_database_cleanup())
+
+
+async def _scheduled_discovery_with_database_cleanup() -> dict[str, int]:
+    try:
+        return await _run_one_scheduled_discovery()
+    finally:
+        if get_engine.cache_info().currsize:
+            await get_engine().dispose()
+        get_session_factory.cache_clear()
+        get_engine.cache_clear()
+
+
+async def _run_one_scheduled_discovery() -> dict[str, int]:
+    async with get_session_factory()() as session:
+        async with session.begin():
+            claimed = await claim_scheduled_run(session, now=datetime.now(UTC))
+            if claimed is None:
+                return {"claimed": 0, "succeeded": 0, "failed": 0}
+            job, run = claimed
+            scope = ScheduledDiscoveryScope(
+                tenant_id=job.tenant_id,
+                project_id=job.project_id,
+                job_id=job.id,
+                run_id=run.id,
+                networks=tuple(job.networks),
+                ports=tuple(job.ports),
+                timeout_seconds=job.timeout_seconds,
+                max_hosts=job.max_hosts,
+            )
+        try:
+            observations = await collect_observations(
+                networks=scope.networks,
+                ports=scope.ports,
+                timeout_seconds=scope.timeout_seconds,
+                max_hosts=scope.max_hosts,
+                backend=AsyncTcpDiscoveryBackend(),
+            )
+            async with session.begin():
+                job = await get_job(
+                    session,
+                    tenant_id=scope.tenant_id,
+                    job_id=scope.job_id,
+                )
+                run = await get_run(
+                    session,
+                    tenant_id=scope.tenant_id,
+                    run_id=scope.run_id,
+                )
+                await complete_run(session, job=job, run=run, observations=observations)
+                await _append_worker_discovery_audit(
+                    session,
+                    tenant_id=scope.tenant_id,
+                    project_id=scope.project_id,
+                    run_id=scope.run_id,
+                    outcome="success",
+                    metadata={"candidate_count": run.candidate_count},
+                )
+        except ApplicationError as error:
+            await _record_scheduled_discovery_failure(session, scope=scope, error_code=error.code)
+            DISCOVERY_SCHEDULED_RUNS.labels("failure").inc()
+            return {"claimed": 1, "succeeded": 0, "failed": 1}
+        except Exception:
+            await _record_scheduled_discovery_failure(session, scope=scope, error_code="AIOPS_3313")
+            DISCOVERY_SCHEDULED_RUNS.labels("failure").inc()
+            return {"claimed": 1, "succeeded": 0, "failed": 1}
+    DISCOVERY_SCHEDULED_RUNS.labels("success").inc()
+    return {"claimed": 1, "succeeded": 1, "failed": 0}
+
+
+async def _record_scheduled_discovery_failure(
+    session: AsyncSession, *, scope: ScheduledDiscoveryScope, error_code: str
+) -> None:
+    async with session.begin():
+        await fail_run(
+            session,
+            tenant_id=scope.tenant_id,
+            job_id=scope.job_id,
+            run_id=scope.run_id,
+            error_code=error_code,
+        )
+        await _append_worker_discovery_audit(
+            session,
+            tenant_id=scope.tenant_id,
+            project_id=scope.project_id,
+            run_id=scope.run_id,
+            outcome="failure",
+            metadata={"error_code": error_code},
+        )
+
+
+async def _append_worker_discovery_audit(
+    session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    project_id: UUID,
+    run_id: UUID,
+    outcome: str,
+    metadata: dict[str, object],
+) -> None:
+    request = Request(
+        {
+            "type": "http",
+            "method": "WORKER",
+            "path": "/internal/scheduled-discovery",
+            "headers": [],
+            "query_string": b"",
+            "scheme": "internal",
+            "server": None,
+            "client": None,
+        }
+    )
+    await append_audit(
+        session,
+        request,
+        action="discovery.run.completed",
+        resource_type="discovery_run",
+        outcome=outcome,
+        actor_type="service",
+        actor_id="aiops-x-worker",
+        tenant_id=tenant_id,
+        project_id=project_id,
+        resource_id=str(run_id),
+        metadata=metadata,
+        producer="aiops-x-worker",
+    )
+
+
+@celery_app.task(name="aiops_x_worker.sync_prometheus_targets")  # type: ignore[untyped-decorator]
+def sync_prometheus_targets() -> dict[str, int]:
+    get_session_factory.cache_clear()
+    get_engine.cache_clear()
+    return asyncio.run(_sync_prometheus_targets_with_database_cleanup())
+
+
+async def _sync_prometheus_targets_with_database_cleanup() -> dict[str, int]:
+    try:
+        return await _sync_prometheus_targets()
+    finally:
+        if get_engine.cache_info().currsize:
+            await get_engine().dispose()
+        get_session_factory.cache_clear()
+        get_engine.cache_clear()
+
+
+async def _sync_prometheus_targets() -> dict[str, int]:
+    from aiops_x_api.core.config import get_settings
+
+    async with get_session_factory()() as session:
+        rows = (
+            await session.execute(
+                select(MonitorTarget, AssetMonitorBinding)
+                .join(
+                    AssetMonitorBinding,
+                    AssetMonitorBinding.monitor_target_id == MonitorTarget.id,
+                )
+                .where(
+                    MonitorTarget.enabled.is_(True),
+                    MonitorTarget.target_type == "node_exporter",
+                    MonitorTarget.prometheus_job == "node",
+                    AssetMonitorBinding.enabled.is_(True),
+                    AssetMonitorBinding.purpose == "node_metrics",
+                )
+                .order_by(MonitorTarget.id)
+                .limit(10_000)
+            )
+        ).all()
+    document = [
+        {
+            "targets": [target.prometheus_instance],
+            "labels": {
+                "aiops_tenant_slug": target.tenant_slug,
+                "aiops_project_slug": target.project_slug,
+                binding.identity_label: binding.identity_value,
+            },
+        }
+        for target, binding in rows
+    ]
+    try:
+        await asyncio.to_thread(
+            _atomic_write_json,
+            Path(get_settings().prometheus_target_file_path),
+            document,
+        )
+    except OSError:
+        PROMETHEUS_TARGET_SYNC_FAILED.inc()
+        raise
+    PROMETHEUS_TARGETS_CONFIGURED.set(len(document))
+    return {"published": len(document)}
+
+
+def _atomic_write_json(path: Path, document: object) -> None:
+    path.parent.mkdir(mode=0o750, parents=True, exist_ok=True)
+    content = json.dumps(document, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    with NamedTemporaryFile(
+        mode="w", encoding="utf-8", dir=path.parent, prefix=".targets-", delete=False
+    ) as temporary:
+        temporary.write(content)
+        temporary.write("\n")
+        temporary.flush()
+        os.fsync(temporary.fileno())
+        temporary_path = Path(temporary.name)
+    temporary_path.chmod(0o640)
+    os.replace(temporary_path, path)
 
 
 @celery_app.task(name="aiops_x_worker.publish_event_outbox")  # type: ignore[untyped-decorator]

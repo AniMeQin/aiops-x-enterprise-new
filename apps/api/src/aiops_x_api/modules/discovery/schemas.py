@@ -20,6 +20,8 @@ class DiscoveryJobCreate(BaseModel):
     timeout_seconds: float = Field(default=0.5, ge=0.1, le=5.0)
     max_hosts: int = Field(default=256, ge=1, le=256)
     enabled: bool = True
+    schedule_enabled: bool = False
+    schedule_interval_seconds: int = Field(default=300, ge=300, le=86400)
 
     @field_validator("networks")
     @classmethod
@@ -50,6 +52,9 @@ class DiscoveryJobResponse(BaseModel):
     timeout_seconds: float
     max_hosts: int
     enabled: bool
+    schedule_enabled: bool
+    schedule_interval_seconds: int
+    next_run_at: datetime | None
     run_count: int
     last_run_status: str
     last_started_at: datetime | None

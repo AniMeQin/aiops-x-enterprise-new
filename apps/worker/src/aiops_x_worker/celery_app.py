@@ -35,6 +35,18 @@ celery_app.conf.update(
             "task": "aiops_x_worker.consume_event_observability",
             "schedule": 5.0,
         },
+        "sync-prometheus-targets": {
+            "task": "aiops_x_worker.sync_prometheus_targets",
+            "schedule": 15.0,
+        },
+        "run-scheduled-discovery": {
+            "task": "aiops_x_worker.run_scheduled_discovery",
+            "schedule": 30.0,
+        },
+        "sync-prometheus-rules": {
+            "task": "aiops_x_worker.sync_prometheus_rules",
+            "schedule": 15.0,
+        },
     },
 )
 start_monitoring_server()

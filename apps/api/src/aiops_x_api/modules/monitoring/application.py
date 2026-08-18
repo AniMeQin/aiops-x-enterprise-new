@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from urllib.parse import urlsplit
 from uuid import UUID
 
 from sqlalchemy import select
@@ -9,7 +10,7 @@ from aiops_x_api.core.config import get_settings
 from aiops_x_api.core.errors import ApplicationError
 from aiops_x_api.modules.cmdb.application import get_asset_for_scope
 from aiops_x_api.modules.cmdb.contracts import AssetView
-from aiops_x_api.modules.monitoring.contracts import MetricSample, MetricsBackend
+from aiops_x_api.modules.monitoring.contracts import MetricSample, MetricsBackend, MetricSeries
 from aiops_x_api.modules.monitoring.infrastructure.models import (
     AssetMonitorBinding,
     CollectorState,
@@ -23,6 +24,31 @@ class VerifiedTarget:
     binding: AssetMonitorBinding
     up_sample: MetricSample
     verified_at: datetime
+
+
+def validate_target_instance(instance: str, asset: AssetView) -> None:
+    try:
+        parsed = urlsplit("//" + instance)
+        host = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        host, port = None, None
+    allowed_hosts = {value.lower() for value in asset.ip_addresses}
+    if asset.hostname:
+        allowed_hosts.add(asset.hostname.lower().rstrip("."))
+    if (
+        host is None
+        or port is None
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or host.lower().rstrip(".") not in allowed_hosts
+    ):
+        raise ApplicationError(
+            code="AIOPS_5215",
+            message="Prometheus 目标必须是资产登记的 IP 或主机名及显式端口",
+            status_code=422,
+        )
 
 
 async def record_collector_result(
@@ -183,9 +209,30 @@ async def collect_node_metrics(
     now: datetime | None = None,
 ) -> tuple[VerifiedTarget, dict[str, list[MetricSample]]]:
     verified = await verify_target(backend, target=target, binding=binding, now=now)
+    queries = node_metric_queries(target, binding)
+    samples = {"up": [verified.up_sample]}
+    for name, query in queries.items():
+        if name == "up":
+            continue
+        values = await backend.instant_query(query)
+        if len(values) > 128:
+            raise ApplicationError(
+                code="AIOPS_5205",
+                message="资产监控指标返回过多样本",
+                status_code=409,
+                details={"metric": name, "matching_samples": len(values)},
+            )
+        for value in values:
+            require_sample_identity(value, target, binding)
+            require_sample_freshness(value, now=verified.verified_at)
+        samples[name] = values
+    return verified, samples
+
+
+def node_metric_queries(target: MonitorTarget, binding: AssetMonitorBinding) -> dict[str, str]:
     selector = target_selector(target, binding)
     identity_group = "job,instance,aiops_tenant_slug,aiops_project_slug," + binding.identity_label
-    queries = {
+    return {
         "up": "up" + selector,
         "cpu": (
             "100 - (avg by ("
@@ -212,22 +259,165 @@ async def collect_node_metrics(
             )
             + ")"
         ),
+        "load1": "node_load1" + selector,
+        "load5": "node_load5" + selector,
+        "load15": "node_load15" + selector,
+        "cpu_cores": "count by ("
+        + identity_group
+        + ") (count by (cpu,"
+        + identity_group
+        + ") (node_cpu_seconds_total"
+        + selector
+        + "))",
+        "cpu_time": "sum by (mode,"
+        + identity_group
+        + ") (rate(node_cpu_seconds_total"
+        + selector
+        + "[5m]))",
+        "memory_total_bytes": "node_memory_MemTotal_bytes" + selector,
+        "memory_available_bytes": "node_memory_MemAvailable_bytes" + selector,
+        "memory_cached_bytes": "node_memory_Cached_bytes" + selector,
+        "swap_total_bytes": "node_memory_SwapTotal_bytes" + selector,
+        "swap_free_bytes": "node_memory_SwapFree_bytes" + selector,
+        "filesystem_inode_usage": "100 * (1 - node_filesystem_files_free"
+        + selector
+        + " / node_filesystem_files"
+        + selector
+        + ")",
+        "disk_read_iops": "sum by (device,"
+        + identity_group
+        + ") (rate(node_disk_reads_completed_total"
+        + selector
+        + "[5m]))",
+        "disk_write_iops": "sum by (device,"
+        + identity_group
+        + ") (rate(node_disk_writes_completed_total"
+        + selector
+        + "[5m]))",
+        "disk_read_bytes": "sum by (device,"
+        + identity_group
+        + ") (rate(node_disk_read_bytes_total"
+        + selector
+        + "[5m]))",
+        "disk_write_bytes": "sum by (device,"
+        + identity_group
+        + ") (rate(node_disk_written_bytes_total"
+        + selector
+        + "[5m]))",
+        "network_receive_bytes": "sum by (device,"
+        + identity_group
+        + ") (rate(node_network_receive_bytes_total"
+        + selector
+        + "[5m]))",
+        "network_transmit_bytes": "sum by (device,"
+        + identity_group
+        + ") (rate(node_network_transmit_bytes_total"
+        + selector
+        + "[5m]))",
+        "network_receive_packets": "sum by (device,"
+        + identity_group
+        + ") (rate(node_network_receive_packets_total"
+        + selector
+        + "[5m]))",
+        "network_transmit_packets": "sum by (device,"
+        + identity_group
+        + ") (rate(node_network_transmit_packets_total"
+        + selector
+        + "[5m]))",
+        "network_errors": "sum by (device,"
+        + identity_group
+        + ") (rate(node_network_receive_errs_total"
+        + selector
+        + "[5m]) + rate(node_network_transmit_errs_total"
+        + selector
+        + "[5m]))",
+        "network_drops": "sum by (device,"
+        + identity_group
+        + ") (rate(node_network_receive_drop_total"
+        + selector
+        + "[5m]) + rate(node_network_transmit_drop_total"
+        + selector
+        + "[5m]))",
+        "uptime_seconds": "time() - node_boot_time_seconds" + selector,
+        "processes_running": "node_procs_running" + selector,
+        "processes_blocked": "node_procs_blocked" + selector,
+        "tcp_connections": "node_sockstat_TCP_inuse" + selector,
     }
-    samples = {"up": [verified.up_sample]}
-    for name in ("cpu", "memory", "filesystem"):
-        values = await backend.instant_query(queries[name])
-        if len(values) > 1:
-            raise ApplicationError(
-                code="AIOPS_5205",
-                message="资产监控指标返回多个候选样本",
-                status_code=409,
-                details={"metric": name, "matching_samples": len(values)},
-            )
-        for value in values:
-            require_sample_identity(value, target, binding)
-            require_sample_freshness(value, now=verified.verified_at)
-        samples[name] = values
-    return verified, samples
+
+
+async def collect_node_metric_history(
+    backend: MetricsBackend,
+    *,
+    target: MonitorTarget,
+    binding: AssetMonitorBinding,
+    metric: str,
+    start: datetime,
+    end: datetime,
+    step_seconds: int,
+) -> tuple[VerifiedTarget, list[MetricSeries]]:
+    verified = await verify_target(backend, target=target, binding=binding)
+    query = node_metric_queries(target, binding).get(metric)
+    if query is None or metric == "up":
+        raise ApplicationError(code="AIOPS_5212", message="不支持的历史指标", status_code=422)
+    series = await backend.range_query(query, start=start, end=end, step_seconds=step_seconds)
+    if len(series) > 128:
+        raise ApplicationError(code="AIOPS_5205", message="历史指标返回过多序列", status_code=409)
+    for item in series:
+        require_metric_identity(item.metric, target, binding)
+    return verified, series
+
+
+def require_metric_identity(
+    metric: dict[str, str], target: MonitorTarget, binding: AssetMonitorBinding
+) -> None:
+    sample = MetricSample(metric=metric, observed_at=datetime.now(UTC), value=0.0)
+    require_sample_identity(sample, target, binding)
+
+
+def build_alert_expression(
+    *,
+    metric_key: str,
+    operator: str,
+    threshold: float,
+    tenant_slug: str,
+    project_slug: str,
+) -> str:
+    selector = (
+        '{job="node",aiops_tenant_slug="'
+        + _escape_label(tenant_slug)
+        + '",aiops_project_slug="'
+        + _escape_label(project_slug)
+        + '"}'
+    )
+    group = "job,instance,aiops_tenant_slug,aiops_project_slug,aiops_asset_id"
+    values = {
+        "host_down": "up" + selector,
+        "cpu": (
+            "100 - (avg by ("
+            + group
+            + ") (rate(node_cpu_seconds_total"
+            + _merge_selector(selector, {"mode": "idle"})
+            + "[5m])) * 100)"
+        ),
+        "memory": (
+            "(1 - (node_memory_MemAvailable_bytes"
+            + selector
+            + " / node_memory_MemTotal_bytes"
+            + selector
+            + ")) * 100"
+        ),
+        "filesystem": (
+            "100 * (1 - node_filesystem_avail_bytes"
+            + _merge_selector(selector, {"mountpoint": "/"})
+            + " / node_filesystem_size_bytes"
+            + _merge_selector(selector, {"mountpoint": "/"})
+            + ")"
+        ),
+    }
+    expression = values.get(metric_key)
+    if expression is None or operator not in {">", "<", "=="}:
+        raise ApplicationError(code="AIOPS_5220", message="不支持的告警规则条件", status_code=422)
+    return f"{expression} {operator} {threshold:g}"
 
 
 async def require_alert_binding(

@@ -269,6 +269,21 @@ services:
     mem_limit: 128m
     networks: [control-plane]
 
+  prometheus-target-init:
+    image: ${ALPINE_IMAGE:-alpine:3.20.2}
+    user: "0:0"
+    command:
+      - sh
+      - -ec
+      - >-
+        install -d -o 10001 -g 10001 -m 0750 /targets
+        && install -d -o 10001 -g 10001 -m 0750 /rules
+    volumes:
+      - prometheus-targets:/targets
+      - prometheus-rules:/rules
+    restart: "no"
+    networks: [control-plane]
+
   prometheus:
     image: ${PROMETHEUS_IMAGE:-quay.io/prometheus/prometheus:v2.53.1}
     command:
@@ -279,12 +294,15 @@ services:
     volumes:
       - ./deploy/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./deploy/monitoring/rules:/etc/prometheus/rules:ro
+      - prometheus-targets:/etc/prometheus/targets/node:ro
+      - prometheus-rules:/etc/prometheus/dynamic-rules:ro
       - prometheus-data:/prometheus
     ports:
       - "127.0.0.1:9090:9090"
     depends_on:
       node-exporter: {condition: service_healthy}
       alertmanager: {condition: service_healthy}
+      prometheus-target-init: {condition: service_completed_successfully}
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:9090/-/ready >/dev/null"]
       interval: 10s
@@ -384,11 +402,18 @@ services:
       AIOPS_OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       AIOPS_OTEL_SERVICE_NAME: aiops-x-worker
       AIOPS_WORKER_MONITOR_PORT: "8002"
+      AIOPS_PROMETHEUS_TARGET_FILE_PATH: /var/lib/aiops-x/prometheus-targets/targets.json
+      AIOPS_PROMETHEUS_RULE_FILE_PATH: /var/lib/aiops-x/prometheus-rules/managed.json
+      AIOPS_PROMETHEUS_RELOAD_URL: http://prometheus:9090/-/reload
+    volumes:
+      - prometheus-targets:/var/lib/aiops-x/prometheus-targets
+      - prometheus-rules:/var/lib/aiops-x/prometheus-rules
     depends_on:
       postgres: {condition: service_healthy}
       redis: {condition: service_healthy}
       nats: {condition: service_healthy}
       minio-init: {condition: service_completed_successfully}
+      prometheus-target-init: {condition: service_completed_successfully}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/ready', timeout=3)"]
       interval: 10s
@@ -507,6 +532,8 @@ volumes:
   vault-data:
   agent-data:
   prometheus-data:
+  prometheus-targets:
+  prometheus-rules:
   alertmanager-data:
   alertmanager-secrets:
   loki-data:

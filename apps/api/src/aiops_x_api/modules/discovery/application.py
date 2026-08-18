@@ -1,5 +1,5 @@
 import hashlib
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from sqlalchemy import select
@@ -41,6 +41,49 @@ async def get_candidate(
     if candidate is None:
         raise ApplicationError(code="AIOPS_3305", message="发现候选不存在", status_code=404)
     return candidate
+
+
+async def get_run(session: AsyncSession, *, tenant_id: UUID, run_id: UUID) -> DiscoveryRun:
+    run = await session.scalar(
+        select(DiscoveryRun).where(DiscoveryRun.id == run_id, DiscoveryRun.tenant_id == tenant_id)
+    )
+    if run is None:
+        raise ApplicationError(code="AIOPS_3314", message="发现运行不存在", status_code=404)
+    return run
+
+
+async def claim_scheduled_run(
+    session: AsyncSession, *, now: datetime
+) -> tuple[DiscoveryJob, DiscoveryRun] | None:
+    job = await session.scalar(
+        select(DiscoveryJob)
+        .where(
+            DiscoveryJob.enabled.is_(True),
+            DiscoveryJob.schedule_enabled.is_(True),
+            DiscoveryJob.next_run_at.is_not(None),
+            DiscoveryJob.next_run_at <= now,
+        )
+        .order_by(DiscoveryJob.next_run_at, DiscoveryJob.id)
+        .limit(1)
+        .with_for_update(skip_locked=True)
+    )
+    if job is None:
+        return None
+    running = await session.scalar(
+        select(DiscoveryRun.id).where(
+            DiscoveryRun.discovery_job_id == job.id,
+            DiscoveryRun.status == "running",
+        )
+    )
+    job.next_run_at = now + timedelta(seconds=job.schedule_interval_seconds)
+    if running is not None:
+        return None
+    return await start_run(
+        session,
+        tenant_id=job.tenant_id,
+        job_id=job.id,
+        requested_by=job.created_by,
+    )
 
 
 async def start_run(

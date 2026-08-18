@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from typing import Annotated
 from uuid import UUID
 
@@ -108,6 +109,7 @@ async def create_job(
             tenant_id=principal.tenant_id,
             created_by=principal.user_id,
             discovery_type="private_tcp",
+            next_run_at=datetime.now(UTC) if payload.schedule_enabled else None,
             **payload.model_dump(),
         )
         session.add(job)

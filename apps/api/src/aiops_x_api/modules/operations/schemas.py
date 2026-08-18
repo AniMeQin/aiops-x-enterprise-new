@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class AlertmanagerAlert(BaseModel):
@@ -64,6 +64,13 @@ class AlertResponse(BaseModel):
     evidence_refs: list[dict[str, Any]]
     raw_data_ref: str | None
     duplicate_count: int
+    assigned_to: UUID | None
+    acknowledged_by: UUID | None
+    acknowledged_at: datetime | None
+    closed_by: UUID | None
+    closed_at: datetime | None
+    resolution_summary: str | None
+    reopened_count: int
 
 
 class AlertPage(BaseModel):
@@ -71,6 +78,43 @@ class AlertPage(BaseModel):
     page: int
     page_size: int
     total: int
+
+
+class AlertActionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    action: Literal["assign", "acknowledge", "comment", "close", "reopen"]
+    assignee_id: UUID | None = None
+    comment: str | None = Field(default=None, min_length=1, max_length=2000)
+    resolution_summary: str | None = Field(default=None, min_length=3, max_length=2000)
+
+    @model_validator(mode="after")
+    def validate_action_fields(self) -> "AlertActionRequest":
+        if self.action == "assign" and self.assignee_id is None:
+            raise ValueError("assignee_id is required for assign")
+        if self.action == "comment" and self.comment is None:
+            raise ValueError("comment is required for comment")
+        if self.action == "close" and self.resolution_summary is None:
+            raise ValueError("resolution_summary is required for close")
+        return self
+
+
+class AlertTimelineResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    alert_id: UUID
+    actor_id: UUID | None
+    action: str
+    from_status: str
+    to_status: str
+    comment: str
+    metadata_json: dict[str, Any]
+    occurred_at: datetime
+
+
+class AlertDetail(AlertResponse):
+    timeline: list[AlertTimelineResponse]
 
 
 class EventResponse(BaseModel):

@@ -74,7 +74,7 @@ async def test_alertmanager_normalization_deduplication_event_and_resolution() -
                 "project_id": project["id"],
                 "asset_type": "linux",
                 "name": "Operations Host",
-                "hostname": "operations-host",
+                "hostname": "operations-node",
                 "ip_addresses": ["192.0.2.20"],
                 "environment": "test",
             },
@@ -118,6 +118,23 @@ async def test_alertmanager_normalization_deduplication_event_and_resolution() -
         assert alerts.json()["total"] == 1
         assert alerts.json()["items"][0]["duplicate_count"] == 1
         assert alerts.json()["items"][0]["status"] == "firing"
+        alert_id = alerts.json()["items"][0]["id"]
+
+        acknowledged = client.post(
+            f"/api/v1/alerts/{alert_id}/actions",
+            headers=auth,
+            json={"action": "acknowledge", "comment": "Investigating the host"},
+        )
+        assert acknowledged.status_code == 200, acknowledged.text
+        assert acknowledged.json()["status"] == "acknowledged"
+        assert acknowledged.json()["assigned_to"] is not None
+        premature_close = client.post(
+            f"/api/v1/alerts/{alert_id}/actions",
+            headers=auth,
+            json={"action": "close", "resolution_summary": "Not recovered yet"},
+        )
+        assert premature_close.status_code == 409
+        assert premature_close.json()["code"] == "AIOPS_5012"
 
         events = client.get("/api/v1/events", headers=auth)
         assert events.status_code == 200
@@ -144,6 +161,24 @@ async def test_alertmanager_normalization_deduplication_event_and_resolution() -
         resolved_event = client.get(f"/api/v1/events/{event['id']}", headers=auth)
         assert resolved_event.json()["status"] == "resolved"
         assert len(resolved_event.json()["timeline"]) == 3
+        closed = client.post(
+            f"/api/v1/alerts/{alert_id}/actions",
+            headers=auth,
+            json={
+                "action": "close",
+                "resolution_summary": "Prometheus confirmed the metric recovered",
+            },
+        )
+        assert closed.status_code == 200, closed.text
+        assert closed.json()["status"] == "closed"
+        assert closed.json()["closed_at"] is not None
+        assert [item["action"] for item in closed.json()["timeline"]] == [
+            "created",
+            "deduplicated",
+            "acknowledge",
+            "resolved",
+            "close",
+        ]
 
         backend_state["observed_at"] = datetime.now(UTC) - timedelta(minutes=10)
         stale = client.post(
@@ -172,6 +207,8 @@ async def test_alertmanager_normalization_deduplication_event_and_resolution() -
             "alert.deduplicated",
             "alert.resolved",
             "event.auto_created",
+            "alert.acknowledge",
+            "alert.close",
         } <= actions
 
     app.dependency_overrides.clear()

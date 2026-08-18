@@ -61,6 +61,9 @@ class Settings(BaseSettings):
     alertmanager_webhook_token: SecretStr = SecretStr("change-me-development-alertmanager-token")
     prometheus_url: str = "http://prometheus:9090"
     monitoring_sample_max_age_seconds: int = Field(default=90, ge=15, le=600)
+    prometheus_target_file_path: str = "/var/lib/aiops-x/prometheus-targets/targets.json"
+    prometheus_rule_file_path: str = "/var/lib/aiops-x/prometheus-rules/managed.json"
+    prometheus_reload_url: str = "http://prometheus:9090/-/reload"
     loki_url: str = "http://loki:3100"
     tempo_url: str = "http://tempo:3200"
     alert_correlation_window_seconds: int = Field(default=900, ge=60, le=86400)

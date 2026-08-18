@@ -7,7 +7,7 @@ import pytest
 from aiops_x_api.core.config import get_settings
 from aiops_x_api.core.database import Base, get_session
 from aiops_x_api.main import create_app
-from aiops_x_api.modules.monitoring.contracts import MetricSample
+from aiops_x_api.modules.monitoring.contracts import MetricPoint, MetricSample, MetricSeries
 from aiops_x_api.modules.monitoring.dependencies import get_metrics_backend
 from aiops_x_api.modules.monitoring.infrastructure.models import CollectorState
 from fastapi.testclient import TestClient
@@ -36,6 +36,20 @@ class FakeMetricsBackend:
         value = 12.5 if "node_cpu" in query else 34.5 if "MemAvailable" in query else 56.5
         return [MetricSample(self.labels, self.observed_at, value)]
 
+    async def range_query(
+        self, query: str, *, start: datetime, end: datetime, step_seconds: int
+    ) -> list[MetricSeries]:
+        self.queries.append(query)
+        return [
+            MetricSeries(
+                metric=self.labels,
+                points=(
+                    MetricPoint(observed_at=start, value=11.0),
+                    MetricPoint(observed_at=end, value=22.0),
+                ),
+            )
+        ]
+
 
 @pytest.mark.filterwarnings("ignore:Using `httpx` with `starlette.testclient` is deprecated")
 async def test_node_metrics_require_unique_verified_fresh_asset_binding() -> None:
@@ -63,6 +77,47 @@ async def test_node_metrics_require_unique_verified_fresh_asset_binding() -> Non
     with TestClient(app) as client:
         auth, project, asset = _bootstrap_scope(client)
 
+        rule = client.post(
+            "/api/v1/monitoring/alert-rules",
+            headers=auth,
+            json={
+                "project_id": project["id"],
+                "slug": "host-cpu-high",
+                "name": "Host CPU high",
+                "metric_key": "cpu",
+                "operator": ">",
+                "threshold": 85,
+                "duration_seconds": 300,
+                "severity": "warning",
+                "summary": "Host CPU usage is high",
+                "description": "CPU remained above the managed threshold",
+            },
+        )
+        assert rule.status_code == 201, rule.text
+        assert rule.json()["version"]["status"] == "draft"
+        assert 'aiops_tenant_slug="monitoring-tenant"' in rule.json()["version"]["expression"]
+        version = client.post(
+            f"/api/v1/monitoring/alert-rules/{rule.json()['id']}/versions",
+            headers=auth,
+            json={
+                "metric_key": "cpu",
+                "operator": ">",
+                "threshold": 90,
+                "duration_seconds": 600,
+                "severity": "critical",
+                "summary": "Host CPU usage is critical",
+                "description": "CPU remained above the critical threshold",
+            },
+        )
+        assert version.status_code == 201, version.text
+        published = client.post(
+            f"/api/v1/monitoring/alert-rules/{rule.json()['id']}/versions/2/publish",
+            headers=auth,
+        )
+        assert published.status_code == 200, published.text
+        assert published.json()["published_version"] == 2
+        assert published.json()["version"]["status"] == "published"
+
         unbound = client.get(f"/api/v1/monitoring/assets/{asset['id']}/node-metrics", headers=auth)
         assert unbound.status_code == 409
         assert unbound.json()["code"] == "AIOPS_5204"
@@ -85,6 +140,14 @@ async def test_node_metrics_require_unique_verified_fresh_asset_binding() -> Non
         assert target_body["binding"]["identity_value"] == "MON-LINUX-001"
         assert target_body["binding"]["verification_status"] == "unverified"
 
+        unrelated_target = client.patch(
+            f"/api/v1/monitoring/targets/{target_body['id']}",
+            headers=auth,
+            json={"prometheus_instance": "unrelated.example.test:9100"},
+        )
+        assert unrelated_target.status_code == 422
+        assert unrelated_target.json()["code"] == "AIOPS_5215"
+
         duplicate = client.post(
             "/api/v1/monitoring/targets",
             headers=auth,
@@ -92,8 +155,8 @@ async def test_node_metrics_require_unique_verified_fresh_asset_binding() -> Non
                 "project_id": project["id"],
                 "asset_id": asset["id"],
                 "name": "Duplicate binding",
-                "prometheus_job": "node-two",
-                "prometheus_instance": "node-exporter-two:9100",
+                "prometheus_job": "node",
+                "prometheus_instance": "node-exporter:9200",
             },
         )
         assert duplicate.status_code == 409
@@ -118,6 +181,36 @@ async def test_node_metrics_require_unique_verified_fresh_asset_binding() -> Non
         assert body["root_filesystem_usage_percent"] == 56.5
         assert "prometheus_url" not in body
         assert all('aiops_asset_id="MON-LINUX-001"' in query for query in backend.queries)
+
+        history = client.get(
+            f"/api/v1/monitoring/assets/{asset['id']}/node-metrics/history",
+            headers=auth,
+            params={
+                "metric": "cpu",
+                "start": (datetime.now(UTC) - timedelta(hours=1)).isoformat(),
+                "end": datetime.now(UTC).isoformat(),
+                "step_seconds": 60,
+            },
+        )
+        assert history.status_code == 200, history.text
+        assert history.json()["source"] == "prometheus"
+        assert history.json()["metric_name"] == "cpu"
+        assert [point["value"] for point in history.json()["series"][0]["points"]] == [
+            11.0,
+            22.0,
+        ]
+
+        oversized_history = client.get(
+            f"/api/v1/monitoring/assets/{asset['id']}/node-metrics/history",
+            headers=auth,
+            params={
+                "metric": "cpu",
+                "start": (datetime.now(UTC) - timedelta(days=8)).isoformat(),
+                "end": datetime.now(UTC).isoformat(),
+            },
+        )
+        assert oversized_history.status_code == 422
+        assert oversized_history.json()["code"] == "AIOPS_5214"
 
         current_asset = client.get(f"/api/v1/assets/{asset['id']}", headers=auth).json()
         assert current_asset["monitoring_status"] == "active"
@@ -243,7 +336,7 @@ def _bootstrap_scope(client: TestClient) -> tuple[dict[str, str], dict[str, Any]
             "project_id": project["id"],
             "asset_type": "linux",
             "name": "Monitoring Linux Host",
-            "hostname": "monitoring-host",
+            "hostname": "node-exporter",
             "ip_addresses": ["192.0.2.30"],
             "environment": "test",
         },

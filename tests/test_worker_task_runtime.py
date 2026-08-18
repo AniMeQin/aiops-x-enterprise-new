@@ -1,5 +1,8 @@
+import json
 from collections import namedtuple
+from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from aiops_x_worker import tasks
 
@@ -58,3 +61,40 @@ def test_worker_releases_async_database_pool_between_event_loops(monkeypatch: An
     assert engine.dispose_count == 2
     assert engine_factory.clear_count == 4
     assert session_factory.clear_count == 4
+
+
+def test_prometheus_file_sd_write_is_atomic_and_machine_readable(tmp_path: Path) -> None:
+    target_path = tmp_path / "targets" / "targets.json"
+    document = [
+        {
+            "targets": ["10.20.30.40:9100"],
+            "labels": {
+                "aiops_tenant_slug": "tenant",
+                "aiops_project_slug": "project",
+                "aiops_asset_id": "ASSET-001",
+            },
+        }
+    ]
+    tasks._atomic_write_json(target_path, document)
+    assert json.loads(target_path.read_text(encoding="utf-8")) == document
+    assert not list(target_path.parent.glob(".targets-*"))
+
+
+def test_managed_rule_renderer_emits_versioned_prometheus_contract() -> None:
+    document = tasks.render_prometheus_rules(
+        [
+            tasks.PublishedRuleDocument(
+                rule_id=uuid4(),
+                slug="host-cpu-high",
+                version=2,
+                expression='up{aiops_asset_id="ASSET-001"} == 0',
+                duration_seconds=300,
+                labels={"severity": "critical"},
+                annotations={"summary": "Host down"},
+            )
+        ]
+    )
+    rule = document["groups"][0]["rules"][0]
+    assert rule["alert"] == "AIOpsX_host_cpu_high_v2"
+    assert rule["for"] == "300s"
+    assert rule["labels"] == {"severity": "critical"}
